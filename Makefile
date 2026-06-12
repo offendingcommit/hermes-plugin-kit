@@ -1,0 +1,24 @@
+.DEFAULT_GOAL := help
+UV ?= uv
+
+.PHONY: help install test test-one build clean
+
+help: ## Show available targets
+	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
+		awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
+
+install: ## Create/sync the uv-managed environment
+	$(UV) sync
+
+test: ## Run the full unittest suite
+	$(UV) run python -m unittest discover -s tests
+
+test-one: ## Run a single test: make test-one T=tests.test_kit.Class.method
+	$(UV) run python -m unittest $(T)
+
+build: ## Build the wheel/sdist distribution
+	$(UV) build
+
+clean: ## Remove Python caches and build artifacts
+	find . -type d -name __pycache__ -prune -exec rm -rf {} +
+	rm -rf .pytest_cache .coverage htmlcov dist build *.egg-info

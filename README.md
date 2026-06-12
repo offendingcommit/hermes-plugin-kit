@@ -86,8 +86,16 @@ A handler returns a `dict` (becomes the success `data`), or raises (becomes a to
 error), or returns a `str` as an escape hatch (treated as already-encoded JSON). It must
 accept `(args, **kwargs)` — runtime keys like `task_id`/`session_id` arrive as kwargs.
 
-## Validation
+## Development
+
+Uses [uv](https://docs.astral.sh/uv/). Install it with `brew install uv` (macOS) or
+`curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 ```bash
-python3 -m unittest discover -s tests
+make install     # uv sync — create/sync the dev environment
+make test        # uv run python -m unittest discover -s tests
+make test-one T=tests.test_kit.SchemaConventionTests
+make build       # uv build — wheel + sdist
 ```
+
+CI runs `make test` on `actions/checkout@v6` + `astral-sh/setup-uv@v8.2.0` (Python 3.13).

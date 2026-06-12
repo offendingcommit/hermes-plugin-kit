@@ -1,3 +1,7 @@
+# Dependency manifest for hermes-plugin-kit (uv-native, GitOps source of truth).
+# Unlike the path-loaded plugins, this IS an installable library: consuming
+# plugins add it as a dependency (private git source) and import it. So it keeps
+# a build-system and stays buildable; it is not `package = false`.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
@@ -7,10 +11,11 @@ name = "hermes-plugin-kit"
 version = "0.1.0"
 description = "Convention-correct tool registration for hermes-agent plugins."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 license = { text = "MIT" }
 authors = [{ name = "Offending Commit", email = "offendingcommit@gmail.com" }]
 keywords = ["hermes", "hermes-agent", "plugin", "llm-tools"]
+dependencies = []
 
 [project.urls]
 Repository = "https://github.com/offendingcommit/hermes-plugin-kit"
