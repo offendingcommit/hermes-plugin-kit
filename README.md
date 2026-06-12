@@ -11,6 +11,19 @@ handler with `@tool`, register it with `register_all`, and the LLM-facing schema
 argument validation, structured logging, and the JSON result envelope are all
 generated for you — correctly, every time.
 
+## Motivation
+
+This began as a one-line fix. A hermes plugin had shipped its tool arguments at the
+top level of the schema instead of under `parameters`; the model received a tool with
+no arguments and couldn't call it until someone opened the plugin's source to find the
+field names. The fix was trivial — but the same mistake was latent in every other
+plugin that hand-rolls its schemas, envelopes, and logging.
+
+Fixing them one at a time and hoping the next author remembers the rules doesn't scale.
+So we pulled the conventions out into a single, reusable kit. Get them right once, here,
+and every plugin that reaches for `@tool` inherits them — and the next person reading a
+tool's logs can actually see what went wrong.
+
 ## Why it exists
 
 Hermes turns each tool into an OpenAI-style function: `{"type": "function",
