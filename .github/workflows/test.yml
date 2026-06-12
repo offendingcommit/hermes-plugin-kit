@@ -15,3 +15,24 @@ jobs:
           enable-cache: true
       - name: Run unittest suite
         run: make test
+
+  # Validate the kit against the *real* hermes-agent source so it can't silently
+  # drift from upstream. Checks out NousResearch/hermes-agent and points the
+  # contract tests at it; they skip if the import fails, so this never blocks on
+  # an upstream layout change — it goes red only on a genuine contract break.
+  hermes-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: NousResearch/hermes-agent
+          path: .hermes-agent
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - name: Run hermes contract tests against upstream main
+        env:
+          HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent
+        run: uv run python -m unittest tests.test_hermes_contract -v
