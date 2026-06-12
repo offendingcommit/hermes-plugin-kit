@@ -20,5 +20,10 @@ dependencies = []
 [project.urls]
 Repository = "https://github.com/offendingcommit/hermes-plugin-kit"
 
+# Runtime stays dependency-free. PyYAML is dev-only: the hermes contract tests
+# import hermes_cli.plugins, which transitively needs yaml. Skipped without it.
+[dependency-groups]
+dev = ["pyyaml"]
+
 [tool.setuptools]
 packages = ["hermes_plugin_kit"]
