@@ -16,6 +16,8 @@ class FakeCtx:
 
 @hpk.tool(
     toolset="messaging",
+    namespace="sample",
+    name=hpk.tool_name("sample", "read", "thread"),
     requires_env=["DISCORD_BOT_TOKEN"],
     emoji="🧵",
     params={
@@ -41,7 +43,7 @@ class SchemaConventionTests(unittest.TestCase):
         self.schema = getattr(sample_read, "_hpk_tool_spec")["schema"]
 
     def test_arguments_live_under_parameters_not_top_level(self) -> None:
-        self.assertEqual(self.schema["name"], "sample_read")
+        self.assertEqual(self.schema["name"], "sample_read_thread")
         self.assertIn("parameters", self.schema)
         self.assertNotIn("properties", self.schema)  # never at the top level
         params = self.schema["parameters"]
@@ -86,6 +88,26 @@ class HandlerBehaviorTests(unittest.TestCase):
         self.assertFalse(out["success"])
         self.assertIn("sample_boom failed", out["error"])
 
+    def test_reserved_agent_loop_tool_name_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reserved"):
+
+            @hpk.tool(toolset="x", name="memory")
+            def reserved(args, **kwargs):
+                """Reserved."""
+                return {}
+
+    def test_reserved_core_namespace_prefix_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reserved Hermes core namespace"):
+            hpk.tool_name("memory", "write", "entry")
+
+    def test_explicit_namespace_must_match_tool_name(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must start with explicit namespace"):
+
+            @hpk.tool(toolset="x", namespace="discord", name="thread_read")
+            def wrong_namespace(args, **kwargs):
+                """Wrong namespace."""
+                return {}
+
     def test_secret_looking_values_redacted_in_logs(self) -> None:
         @hpk.tool(toolset="x", params={"id": hpk.str_arg("id", required=True)})
         def needs_id(args, **kwargs):
@@ -113,8 +135,8 @@ class RegisterAllTests(unittest.TestCase):
         count = hpk.register_all(ctx, __name__)
         self.assertGreaterEqual(count, 2)
         by_name = {tool["name"]: tool for tool in ctx.tools}
-        self.assertIn("sample_read", by_name)
-        sample = by_name["sample_read"]
+        self.assertIn("sample_read_thread", by_name)
+        sample = by_name["sample_read_thread"]
         self.assertEqual(sample["toolset"], "messaging")
         self.assertEqual(sample["requires_env"], ["DISCORD_BOT_TOKEN"])
         self.assertEqual(sample["emoji"], "🧵")
