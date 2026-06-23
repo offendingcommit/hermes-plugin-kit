@@ -47,6 +47,8 @@ the same boilerplate. `hermes-plugin-kit` makes them structurally impossible:
   description, the one field a model reliably sees.
 - **Validation + instructive errors** — a missing or blank required argument returns
   an error that *names the argument and its example*.
+- **Explicit tool namespacing** — build names with `tool_name(namespace, verb, noun)`
+  and reject Hermes agent-loop names such as `memory`.
 - **Logging** — `WARNING` on a rejected call (arguments truncated, secret-looking
   values redacted), `INFO` on success, under your plugin's own logger.
 - **Envelope + safety** — return a plain `dict` (or raise); the kit encodes the JSON
@@ -84,10 +86,12 @@ hermes-plugin-kit = { git = "https://github.com/offendingcommit/hermes-plugin-ki
 `tools.py`:
 
 ```python
-from hermes_plugin_kit import tool, register_all, str_arg, int_arg
+from hermes_plugin_kit import tool, tool_name, register_all, str_arg, int_arg
 
 @tool(
     toolset="messaging",
+    namespace="discord",
+    name=tool_name("discord", "read", "thread"),
     requires_env=["DISCORD_BOT_TOKEN"],
     params={
         "thread_id_or_url": str_arg(
@@ -115,6 +119,23 @@ def register(ctx):
 That's it. `discord_read_thread` is registered with a `parameters`-wrapped schema, a
 self-documenting description, required-argument validation, logging, and the JSON
 envelope — none of which you had to write.
+
+## Tool names
+
+Hermes uses one global tool registry, and the agent loop intercepts core names
+before registry dispatch. Plugin tools should use an explicit domain namespace
+and an action verb:
+
+```python
+name=tool_name("discord", "read", "thread")      # discord_read_thread
+name=tool_name("workspace", "write", "diary")    # workspace_write_diary
+name=tool_name("workspace", "patch", "text")     # workspace_patch_text
+```
+
+Do not register plugin tools with agent-loop names such as `memory`, `todo`,
+`session_search`, or `delegate_task`. The kit also rejects the reserved
+`memory_` prefix so plugin tools cannot be confused with Hermes' built-in
+persistent memory tool.
 
 ## Argument specs
 

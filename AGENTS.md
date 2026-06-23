@@ -8,6 +8,9 @@ plugin.
 
 - Keep the public API centered on `@tool`, `register_all`, and the argument
   helpers exported from `hermes_plugin_kit`.
+- Use `tool_name(namespace, verb, noun)` for new tools and prefer explicit
+  verbs such as `read`, `write`, and `patch`. Do not use Hermes agent-loop
+  names (`memory`, `todo`, `session_search`, `delegate_task`) as plugin tools.
 - Preserve the Hermes tool schema convention: arguments live under
   `function.parameters`, never as flattened top-level schema fields.
 - Tool handlers must accept `(args, **kwargs)` and return JSON-compatible

@@ -46,6 +46,7 @@ import functools
 import inspect
 import json
 import logging
+import re
 import sys
 from typing import Any, Callable
 
@@ -53,6 +54,8 @@ __all__ = [
     "tool",
     "register_all",
     "build_schema",
+    "tool_name",
+    "validate_tool_name",
     "arg",
     "str_arg",
     "int_arg",
@@ -62,6 +65,58 @@ __all__ = [
 _SPEC_ATTR = "_hpk_tool_spec"
 _REDACT_HINTS = ("token", "secret", "password", "passwd", "api_key", "apikey", "auth")
 _MAX_LOG_CHARS = 200
+_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_AGENT_LOOP_TOOL_NAMES = frozenset({"todo", "memory", "session_search", "delegate_task"})
+_RESERVED_NAMESPACE_PREFIXES = ("memory_",)
+
+
+# ---------------------------------------------------------------------------
+# Tool naming
+# ---------------------------------------------------------------------------
+
+def validate_tool_name(name: str, *, namespace: str | None = None) -> str:
+    """Validate a Hermes plugin tool name and return it unchanged.
+
+    Hermes keeps tool names in one global registry. The core agent loop also
+    intercepts a few names before registry dispatch, so plugin tools must avoid
+    those names and should carry an explicit plugin/domain prefix.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("tool name is required")
+    if not _TOOL_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"tool name {name!r} must match {_TOOL_NAME_RE.pattern!r}"
+        )
+    if name in _AGENT_LOOP_TOOL_NAMES:
+        raise ValueError(
+            f"tool name {name!r} is reserved by the Hermes agent loop"
+        )
+    if name.startswith(_RESERVED_NAMESPACE_PREFIXES):
+        raise ValueError(
+            f"tool name {name!r} uses a reserved Hermes core namespace; "
+            "choose a plugin/domain namespace instead"
+        )
+    if namespace is not None:
+        if not _TOOL_NAME_RE.fullmatch(namespace):
+            raise ValueError(
+                f"tool namespace {namespace!r} must match {_TOOL_NAME_RE.pattern!r}"
+            )
+        if namespace in _AGENT_LOOP_TOOL_NAMES:
+            raise ValueError(
+                f"tool namespace {namespace!r} is reserved by the Hermes agent loop"
+            )
+        expected = f"{namespace}_"
+        if not name.startswith(expected):
+            raise ValueError(
+                f"tool name {name!r} must start with explicit namespace {expected!r}"
+            )
+    return name
+
+
+def tool_name(namespace: str, verb: str, noun: str) -> str:
+    """Build and validate a namespaced tool name such as ``discord_read_thread``."""
+    name = "_".join(part.strip("_") for part in (namespace, verb, noun) if part)
+    return validate_tool_name(name, namespace=namespace)
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +193,7 @@ def _augment_description(description: str, required: list, examples: dict) -> st
 
 def build_schema(name: str, description: str, params: dict | None) -> dict:
     """Build a hermes-convention tool schema: arguments nested under ``parameters``."""
+    validate_tool_name(name)
     properties, required, examples = _split_params(params)
     parameters: dict[str, Any] = {
         "type": "object",
@@ -178,6 +234,7 @@ def tool(
     toolset: str,
     params: dict | None = None,
     name: str | None = None,
+    namespace: str | None = None,
     description: str | None = None,
     requires_env: list | None = None,
     emoji: str = "",
@@ -190,7 +247,7 @@ def tool(
     """
 
     def decorate(fn: Callable) -> Callable:
-        tool_name = name or fn.__name__
+        tool_name = validate_tool_name(name or fn.__name__, namespace=namespace)
         doc = (description or inspect.getdoc(fn) or "").strip()
         if not doc:
             raise ValueError(
