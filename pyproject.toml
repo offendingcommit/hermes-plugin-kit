@@ -11,7 +11,7 @@ name = "hermes-plugin-kit"
 version = "0.1.0"
 description = "Convention-correct tool registration for hermes-agent plugins."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Offending Commit", email = "offendingcommit@gmail.com" }]
 keywords = ["hermes", "hermes-agent", "plugin", "llm-tools"]

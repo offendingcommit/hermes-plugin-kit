@@ -3,7 +3,7 @@
 > A `@tool` decorator for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct LLM tool schemas, validation, logging, and the JSON envelope, baked in.
 
 [![test](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml/badge.svg)](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml)
-![python](https://img.shields.io/badge/python-3.13%2B-blue)
+![python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 `hermes-plugin-kit` is a tiny, dependency-free helper for authoring **tools** in
 [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins. Decorate a
@@ -166,7 +166,7 @@ make test-one T=tests.test_kit.SchemaConventionTests
 make build       # uv build — wheel + sdist
 ```
 
-CI runs `make test` on `actions/checkout@v6` + `astral-sh/setup-uv@v8.2.0` (Python 3.13).
+CI runs `make test` on `actions/checkout@v6` + `astral-sh/setup-uv@v8.2.0` (Python 3.11).
 
 ## License
 
