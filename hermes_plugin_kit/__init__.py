@@ -11,8 +11,9 @@ for you, so the classes of bug that bite hand-written plugins cannot recur:
   to the tool description, the one field a model always sees.
 - **Validation + instructive errors** — a missing/blank required argument returns
   an error that names the argument and its example, and logs a WARNING.
-- **Logging** — WARNING on a rejected call (args truncated, secret-looking values
-  redacted), INFO on success, under the plugin's own logger namespace.
+- **Logging** — DEBUG on invocation, WARNING on rejected/failed calls with
+  tracebacks for exceptions, and INFO on success with elapsed time. Arguments
+  are truncated and secret-looking values are recursively redacted.
 - **Envelope + safety** — a handler returns a plain ``dict`` (or raises); the kit
   encodes the JSON string, wraps exceptions, and always returns ``str`` from an
   ``(args, **kwargs)`` signature, exactly as the registry requires.
@@ -48,6 +49,7 @@ import json
 import logging
 import re
 import sys
+import time
 from typing import Any, Callable
 
 __all__ = [
@@ -213,11 +215,23 @@ def build_schema(name: str, description: str, params: dict | None) -> dict:
 # Logging helpers
 # ---------------------------------------------------------------------------
 
+def _redacted_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                "***"
+                if any(hint in str(key).lower() for hint in _REDACT_HINTS)
+                else _redacted_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redacted_value(item) for item in value]
+    return value
+
+
 def _redacted_args(args: dict) -> dict:
-    out: dict[str, Any] = {}
-    for key, value in (args or {}).items():
-        out[key] = "***" if any(hint in key.lower() for hint in _REDACT_HINTS) else value
-    return out
+    return _redacted_value(args or {})
 
 
 def _truncate(value: Any) -> str:
@@ -264,6 +278,19 @@ def tool(
         @functools.wraps(fn)
         def wrapper(args: dict, **kwargs: Any) -> str:
             args = args or {}
+            started = time.perf_counter()
+            safe_args = _truncate(_redacted_args(args))
+            context = {
+                key: kwargs[key]
+                for key in ("session_id", "task_id")
+                if kwargs.get(key) is not None
+            }
+            log.debug(
+                "%s: invoked; args=%s; context=%s",
+                tool_name,
+                safe_args,
+                _truncate(context),
+            )
             for key in required:
                 value = args.get(key)
                 if value is None or (isinstance(value, str) and not value.strip()):
@@ -272,23 +299,39 @@ def tool(
                         f" (e.g. {example!r})" if example is not None else ""
                     )
                     log.warning(
-                        "%s: rejected call, missing %s; args=%s",
+                        "%s: rejected call, missing %s; elapsed_ms=%.2f; args=%s",
                         tool_name,
                         key,
-                        _truncate(_redacted_args(args)),
+                        (time.perf_counter() - started) * 1000,
+                        safe_args,
                     )
                     return json.dumps({"success": False, "error": message}, ensure_ascii=False)
             try:
                 result = fn(args, **kwargs)
             except Exception as exc:  # noqa: BLE001 — tool errors stay in-band
-                log.warning("%s: handler raised: %s", tool_name, exc)
+                log.exception(
+                    "%s: handler raised; elapsed_ms=%.2f; error=%s",
+                    tool_name,
+                    (time.perf_counter() - started) * 1000,
+                    exc,
+                )
                 return json.dumps(
                     {"success": False, "error": f"{tool_name} failed: {exc}"},
                     ensure_ascii=False,
                 )
             if isinstance(result, str):
+                log.info(
+                    "%s: ok; elapsed_ms=%.2f; result=encoded_string",
+                    tool_name,
+                    (time.perf_counter() - started) * 1000,
+                )
                 return result
-            log.info("%s: ok", tool_name)
+            log.info(
+                "%s: ok; elapsed_ms=%.2f; result=%s",
+                tool_name,
+                (time.perf_counter() - started) * 1000,
+                type(result).__name__,
+            )
             return json.dumps({"success": True, "data": result}, ensure_ascii=False)
 
         setattr(
@@ -319,6 +362,7 @@ def register_all(ctx: Any, module: Any) -> int:
     """
     if isinstance(module, str):
         module = sys.modules[module]
+    log = logging.getLogger(getattr(module, "__name__", "hermes_plugin_kit"))
     count = 0
     seen: set[str] = set()
     for _, obj in inspect.getmembers(module):
@@ -336,4 +380,9 @@ def register_all(ctx: Any, module: Any) -> int:
             emoji=spec["emoji"],
         )
         count += 1
+    log.info(
+        "hermes_plugin_kit: registered %d tool(s); names=%s",
+        count,
+        ",".join(sorted(seen)) or "<none>",
+    )
     return count
