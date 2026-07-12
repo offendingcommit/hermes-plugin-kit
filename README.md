@@ -49,8 +49,10 @@ the same boilerplate. `hermes-plugin-kit` makes them structurally impossible:
   an error that *names the argument and its example*.
 - **Explicit tool namespacing** — build names with `tool_name(namespace, verb, noun)`
   and reject Hermes agent-loop names such as `memory`.
-- **Logging** — `WARNING` on a rejected call (arguments truncated, secret-looking
-  values redacted), `INFO` on success, under your plugin's own logger.
+- **Logging** — `DEBUG` when a tool is invoked, `WARNING` on rejected calls and
+  exceptions (including tracebacks), and `INFO` on success with elapsed time and
+  result mode. Arguments are truncated and nested secret-looking values are
+  recursively redacted. `register_all` also logs the registered tool inventory.
 - **Envelope + safety** — return a plain `dict` (or raise); the kit encodes the JSON
   string, catches exceptions, and always returns `str` from an `(args, **kwargs)`
   handler.
@@ -153,6 +155,24 @@ passes through verbatim into the JSON Schema for that property.
 A handler returns a `dict` (becomes the success `data`), or raises (becomes a tool
 error), or returns a `str` as an escape hatch (treated as already-encoded JSON). It must
 accept `(args, **kwargs)` — runtime keys like `task_id`/`session_id` arrive as kwargs.
+
+## Logging contract
+
+The kit logs under the decorated handler's module logger, so each plugin can
+control verbosity with normal Python logging configuration. Tool lifecycle logs
+include:
+
+- `DEBUG`: invocation with truncated, recursively redacted arguments and safe
+  `session_id`/`task_id` context when supplied by Hermes.
+- `WARNING`: required-argument rejection or a handler exception. Exceptions use
+  `logger.exception`, preserving the traceback for runtime diagnosis.
+- `INFO`: successful completion with `elapsed_ms` and whether the handler returned
+  a dictionary-like result or an already-encoded string.
+- `INFO`: a registration summary from `register_all`, including count and names.
+
+The kit never logs handler result payloads. Keys containing `token`, `secret`,
+`password`, `passwd`, `api_key`, `apikey`, or `auth` are replaced with `***` at
+any nesting depth before arguments are logged.
 
 ## Development
 

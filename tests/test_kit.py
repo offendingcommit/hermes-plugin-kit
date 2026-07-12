@@ -65,10 +65,16 @@ class SchemaConventionTests(unittest.TestCase):
 
 class HandlerBehaviorTests(unittest.TestCase):
     def test_success_envelope_and_tolerates_runtime_kwargs(self) -> None:
-        out = json.loads(sample_read({"thread_id_or_url": "999"}, task_id="t", session_id="s"))
+        with self.assertLogs(level="DEBUG") as cap:
+            out = json.loads(sample_read({"thread_id_or_url": "999"}, task_id="t", session_id="s"))
         self.assertTrue(out["success"])
         self.assertEqual(out["data"]["thread"], "999")
         self.assertEqual(out["data"]["kwargs"], ["session_id", "task_id"])
+        joined = "\n".join(cap.output)
+        self.assertIn("sample_read_thread: invoked", joined)
+        self.assertIn('"session_id": "s"', joined)
+        self.assertRegex(joined, r"elapsed_ms=\d+\.\d{2}")
+        self.assertIn("result=dict", joined)
 
     def test_missing_required_returns_instructive_error_and_warns(self) -> None:
         with self.assertLogs(level="WARNING") as cap:
@@ -83,10 +89,14 @@ class HandlerBehaviorTests(unittest.TestCase):
         self.assertFalse(out["success"])
 
     def test_exception_caught_in_band(self) -> None:
-        with self.assertLogs(level="WARNING"):
+        with self.assertLogs(level="WARNING") as cap:
             out = json.loads(sample_boom({"q": "x"}))
         self.assertFalse(out["success"])
         self.assertIn("sample_boom failed", out["error"])
+        joined = "\n".join(cap.output)
+        self.assertIn("Traceback (most recent call last)", joined)
+        self.assertIn("RuntimeError: kaboom", joined)
+        self.assertRegex(joined, r"elapsed_ms=\d+\.\d{2}")
 
     def test_reserved_agent_loop_tool_name_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "reserved"):
@@ -120,19 +130,42 @@ class HandlerBehaviorTests(unittest.TestCase):
         self.assertIn("***", joined)
         self.assertNotIn("supersecret", joined)
 
+    def test_nested_secret_looking_values_redacted_in_logs(self) -> None:
+        @hpk.tool(toolset="x")
+        def nested(args, **kwargs):
+            """Accept nested configuration."""
+            return {}
+
+        with self.assertLogs(level="DEBUG") as cap:
+            nested(
+                {
+                    "config": {
+                        "api_key": "nested-secret",
+                        "headers": [{"authorization": "Bearer hidden"}],
+                    }
+                }
+            )
+        joined = "\n".join(cap.output)
+        self.assertNotIn("nested-secret", joined)
+        self.assertNotIn("Bearer hidden", joined)
+        self.assertGreaterEqual(joined.count("***"), 2)
+
     def test_string_return_is_passthrough(self) -> None:
         @hpk.tool(toolset="x")
         def already_json(args, **kwargs):
             """Returns its own JSON."""
             return '{"raw": true}'
 
-        self.assertEqual(already_json({}), '{"raw": true}')
+        with self.assertLogs(level="INFO") as cap:
+            self.assertEqual(already_json({}), '{"raw": true}')
+        self.assertIn("result=encoded_string", "\n".join(cap.output))
 
 
 class RegisterAllTests(unittest.TestCase):
     def test_registers_every_decorated_tool_with_convention(self) -> None:
         ctx = FakeCtx()
-        count = hpk.register_all(ctx, __name__)
+        with self.assertLogs(level="INFO") as cap:
+            count = hpk.register_all(ctx, __name__)
         self.assertGreaterEqual(count, 2)
         by_name = {tool["name"]: tool for tool in ctx.tools}
         self.assertIn("sample_read_thread", by_name)
@@ -142,6 +175,9 @@ class RegisterAllTests(unittest.TestCase):
         self.assertEqual(sample["emoji"], "🧵")
         self.assertIn("parameters", sample["schema"])
         self.assertTrue(callable(sample["handler"]))
+        joined = "\n".join(cap.output)
+        self.assertIn(f"registered {count} tool(s)", joined)
+        self.assertIn("sample_read_thread", joined)
 
     def test_description_requires_a_docstring(self) -> None:
         with self.assertRaises(ValueError):
