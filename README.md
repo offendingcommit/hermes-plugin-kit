@@ -1,13 +1,15 @@
 # hermes-plugin-kit
 
-> A `@tool` decorator for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct LLM tool schemas, validation, logging, and the JSON envelope, baked in.
+> Lifecycle helpers for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct tools, hooks, skills, validation, and safe logging, baked in.
 
 [![test](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml/badge.svg)](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 
-`hermes-plugin-kit` is a tiny, dependency-free helper for authoring **tools** in
-[hermes-agent](https://github.com/NousResearch/hermes-agent) plugins. Decorate a
-handler with `@tool`, register it with `register_all`, and the LLM-facing schema,
+`hermes-plugin-kit` is a tiny, dependency-free helper for authoring plugins for
+[hermes-agent](https://github.com/NousResearch/hermes-agent). Decorate a tool
+with `@tool` or a lifecycle callback with `@hook`, then use `register_plugin` to
+register tools, hooks, and plugin-owned skills together. Existing tool-only
+plugins can keep using `register_all`; the LLM-facing schema,
 argument validation, structured logging, and the JSON result envelope are all
 generated for you — correctly, every time.
 
@@ -121,6 +123,42 @@ def register(ctx):
 That's it. `discord_read_thread` is registered with a `parameters`-wrapped schema, a
 self-documenting description, required-argument validation, logging, and the JSON
 envelope — none of which you had to write.
+
+## Hooks and plugin skills
+
+Use the lifecycle entrypoint when a plugin provides more than tools:
+
+```python
+from pathlib import Path
+from hermes_plugin_kit import hook, plugin_skill, register_plugin
+
+@hook("pre_llm_call")
+def inject_context(**kwargs):
+    return {"context": build_context(kwargs)}
+
+SKILLS = (
+    plugin_skill(
+        "temporal-awareness",
+        Path(__file__).with_name("SKILL.md"),
+        "Calibrate responses against local time and message gaps.",
+        optional=True,
+    ),
+)
+
+def register(ctx):
+    return register_plugin(ctx, __name__, skills=SKILLS)
+```
+
+`@hook` forwards Hermes keyword arguments and return values unchanged. It logs
+only the hook name, elapsed time, result type, and supplied `session_id` or
+`task_id`; callback payloads and exception messages are never logged. Exceptions
+are re-raised so Hermes retains its normal per-plugin isolation behavior.
+
+`plugin_skill` validates the bare skill name, `SKILL.md` path, and description.
+Required missing skills fail registration; optional missing skills warn and are
+reported in the returned `RegistrationSummary`. Hermes supplies the plugin
+namespace, so a declared `temporal-awareness` skill from plugin
+`temporal-awareness` resolves as `temporal-awareness:temporal-awareness`.
 
 ## Tool names
 

@@ -50,10 +50,16 @@ import logging
 import re
 import sys
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 __all__ = [
     "tool",
+    "hook",
+    "plugin_skill",
+    "register_plugin",
+    "RegistrationSummary",
     "register_all",
     "build_schema",
     "tool_name",
@@ -65,11 +71,33 @@ __all__ = [
 ]
 
 _SPEC_ATTR = "_hpk_tool_spec"
+_HOOK_SPEC_ATTR = "_hpk_hook_spec"
 _REDACT_HINTS = ("token", "secret", "password", "passwd", "api_key", "apikey", "auth")
 _MAX_LOG_CHARS = 200
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _AGENT_LOOP_TOOL_NAMES = frozenset({"todo", "memory", "session_search", "delegate_task"})
 _RESERVED_NAMESPACE_PREFIXES = ("memory_",)
+_SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+@dataclass(frozen=True)
+class PluginSkill:
+    """Validated declaration for a plugin-owned, read-only Hermes skill."""
+
+    name: str
+    path: Path
+    description: str
+    optional: bool = False
+
+
+@dataclass(frozen=True)
+class RegistrationSummary:
+    """Inventory of lifecycle surfaces registered by :func:`register_plugin`."""
+
+    tools: tuple[str, ...] = ()
+    hooks: tuple[str, ...] = ()
+    skills: tuple[str, ...] = ()
+    skipped_optional_skills: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +267,84 @@ def _truncate(value: Any) -> str:
     return text if len(text) <= _MAX_LOG_CHARS else text[:_MAX_LOG_CHARS] + "…"
 
 
+def _safe_context(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return only Hermes correlation identifiers that are safe to log."""
+    return {
+        key: kwargs[key]
+        for key in ("session_id", "task_id")
+        if kwargs.get(key) is not None
+    }
+
+
 # ---------------------------------------------------------------------------
 # The decorator
 # ---------------------------------------------------------------------------
+
+def hook(name: str) -> Callable:
+    """Mark and instrument a Hermes lifecycle hook callback.
+
+    The wrapper preserves Hermes' callback contract: keyword arguments and the
+    return value pass through unchanged, and exceptions are re-raised for the
+    plugin manager to isolate. Logs contain correlation identifiers only, never
+    message payloads or exception messages.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("hook name is required")
+    hook_name = name.strip()
+
+    def decorate(fn: Callable) -> Callable:
+        log = logging.getLogger(fn.__module__ or "hermes_plugin_kit")
+
+        @functools.wraps(fn)
+        def wrapper(**kwargs: Any) -> Any:
+            started = time.perf_counter()
+            context = _safe_context(kwargs)
+            log.debug(
+                "%s: invoked; context=%s",
+                hook_name,
+                _truncate(context),
+            )
+            try:
+                result = fn(**kwargs)
+            except Exception as exc:
+                log.warning(
+                    "%s: callback raised; elapsed_ms=%.2f; error_type=%s; context=%s",
+                    hook_name,
+                    (time.perf_counter() - started) * 1000,
+                    type(exc).__name__,
+                    _truncate(context),
+                )
+                raise
+            log.info(
+                "%s: ok; elapsed_ms=%.2f; result=%s; context=%s",
+                hook_name,
+                (time.perf_counter() - started) * 1000,
+                type(result).__name__,
+                _truncate(context),
+            )
+            return result
+
+        setattr(wrapper, _HOOK_SPEC_ATTR, {"name": hook_name})
+        return wrapper
+
+    return decorate
+
+
+def plugin_skill(
+    name: str,
+    path: str | Path,
+    description: str,
+    optional: bool = False,
+) -> PluginSkill:
+    """Declare a plugin-owned ``SKILL.md`` for :func:`register_plugin`."""
+    if not isinstance(name, str) or not _SKILL_NAME_RE.fullmatch(name):
+        raise ValueError("skill name must match [a-zA-Z0-9_-]+ and contain no namespace")
+    skill_path = Path(path)
+    if skill_path.name != "SKILL.md":
+        raise ValueError("skill path must point to SKILL.md")
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("skill description is required")
+    return PluginSkill(name, skill_path, description.strip(), bool(optional))
 
 def tool(
     *,
@@ -386,3 +489,101 @@ def register_all(ctx: Any, module: Any) -> int:
         ",".join(sorted(seen)) or "<none>",
     )
     return count
+
+
+def register_plugin(
+    ctx: Any,
+    module: Any,
+    skills: tuple[PluginSkill, ...] | list[PluginSkill] = (),
+) -> RegistrationSummary:
+    """Register decorated tools, hooks, and declared skills from *module*.
+
+    Unlike the backward-compatible :func:`register_all`, this lifecycle-level
+    entrypoint rejects distinct declarations that share a public name. Missing
+    optional skills are warned and skipped; missing required skills fail fast.
+    """
+    if isinstance(module, str):
+        module = sys.modules[module]
+    log = logging.getLogger(getattr(module, "__name__", "hermes_plugin_kit"))
+
+    tools: dict[str, Callable] = {}
+    hooks: dict[str, Callable] = {}
+    for _, obj in inspect.getmembers(module):
+        tool_spec = getattr(obj, _SPEC_ATTR, None)
+        if tool_spec:
+            existing = tools.get(tool_spec["name"])
+            if existing is not None and existing is not obj:
+                raise ValueError(f"duplicate tool name: {tool_spec['name']}")
+            tools[tool_spec["name"]] = obj
+
+        hook_spec = getattr(obj, _HOOK_SPEC_ATTR, None)
+        if hook_spec:
+            existing = hooks.get(hook_spec["name"])
+            if existing is not None and existing is not obj:
+                raise ValueError(f"duplicate hook name: {hook_spec['name']}")
+            hooks[hook_spec["name"]] = obj
+
+    declared_skills: dict[str, PluginSkill] = {}
+    for skill in skills:
+        if not isinstance(skill, PluginSkill):
+            raise TypeError("skills must contain plugin_skill() declarations")
+        if skill.name in declared_skills:
+            raise ValueError(f"duplicate skill name: {skill.name}")
+        declared_skills[skill.name] = skill
+
+    registered_tools: list[str] = []
+    for name in sorted(tools):
+        obj = tools[name]
+        spec = getattr(obj, _SPEC_ATTR)
+        ctx.register_tool(
+            name=spec["name"],
+            toolset=spec["toolset"],
+            schema=spec["schema"],
+            handler=obj,
+            requires_env=spec["requires_env"],
+            description=spec["schema"]["description"],
+            emoji=spec["emoji"],
+        )
+        registered_tools.append(name)
+
+    registered_hooks: list[str] = []
+    for name in sorted(hooks):
+        ctx.register_hook(name, hooks[name])
+        registered_hooks.append(name)
+
+    registered_skills: list[str] = []
+    skipped_skills: list[str] = []
+    for name in sorted(declared_skills):
+        skill = declared_skills[name]
+        if not skill.path.is_file():
+            if skill.optional:
+                log.warning(
+                    "hermes_plugin_kit: optional skill missing; name=%s; path=%s",
+                    skill.name,
+                    skill.path,
+                )
+                skipped_skills.append(name)
+                continue
+            raise FileNotFoundError(f"SKILL.md not found at {skill.path}")
+        ctx.register_skill(
+            name=skill.name,
+            path=skill.path,
+            description=skill.description,
+        )
+        registered_skills.append(name)
+
+    summary = RegistrationSummary(
+        tools=tuple(registered_tools),
+        hooks=tuple(registered_hooks),
+        skills=tuple(registered_skills),
+        skipped_optional_skills=tuple(skipped_skills),
+    )
+    log.info(
+        "hermes_plugin_kit: registered plugin lifecycle; tools=%s; hooks=%s; "
+        "skills=%s; skipped_optional_skills=%s",
+        ",".join(summary.tools) or "<none>",
+        ",".join(summary.hooks) or "<none>",
+        ",".join(summary.skills) or "<none>",
+        ",".join(summary.skipped_optional_skills) or "<none>",
+    )
+    return summary

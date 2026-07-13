@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-plugin-kit"
 version = "0.1.0"
-description = "Convention-correct tool registration for hermes-agent plugins."
+description = "Convention-correct lifecycle registration for hermes-agent plugins."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

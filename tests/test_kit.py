@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
+import types
 import unittest
+from pathlib import Path
 
 import hermes_plugin_kit as hpk
 
@@ -12,6 +15,19 @@ class FakeCtx:
 
     def register_tool(self, **kwargs) -> None:
         self.tools.append(kwargs)
+
+
+class FakePluginCtx(FakeCtx):
+    def __init__(self) -> None:
+        super().__init__()
+        self.hooks: list[tuple[str, object]] = []
+        self.skills: list[dict] = []
+
+    def register_hook(self, hook_name, callback) -> None:
+        self.hooks.append((hook_name, callback))
+
+    def register_skill(self, **kwargs) -> None:
+        self.skills.append(kwargs)
 
 
 @hpk.tool(
@@ -185,6 +201,120 @@ class RegisterAllTests(unittest.TestCase):
             @hpk.tool(toolset="x")
             def no_doc(args, **kwargs):
                 return {}
+
+
+class HookBehaviorTests(unittest.TestCase):
+    def test_forwards_kwargs_and_return_value_exactly(self) -> None:
+        marker = object()
+
+        @hpk.hook("pre_llm_call")
+        def callback(**kwargs):
+            self.assertIs(kwargs["payload"], marker)
+            return marker
+
+        with self.assertLogs(level="DEBUG") as cap:
+            self.assertIs(callback(payload=marker, session_id="session-1"), marker)
+        joined = "\n".join(cap.output)
+        self.assertIn("pre_llm_call: invoked", joined)
+        self.assertIn("session-1", joined)
+        self.assertNotIn(repr(marker), joined)
+        self.assertRegex(joined, r"elapsed_ms=\d+\.\d{2}")
+
+    def test_reraises_and_does_not_log_payload_or_exception_message(self) -> None:
+        @hpk.hook("pre_llm_call")
+        def callback(**kwargs):
+            raise RuntimeError("private exception text")
+
+        with self.assertLogs(level="WARNING") as cap:
+            with self.assertRaisesRegex(RuntimeError, "private exception text"):
+                callback(message="private message text", task_id="task-1")
+        joined = "\n".join(cap.output)
+        self.assertIn("RuntimeError", joined)
+        self.assertIn("task-1", joined)
+        self.assertNotIn("private exception text", joined)
+        self.assertNotIn("private message text", joined)
+
+    def test_hook_name_is_required(self) -> None:
+        with self.assertRaisesRegex(ValueError, "hook name"):
+            hpk.hook("")
+
+
+class RegisterPluginTests(unittest.TestCase):
+    def _module(self, **attrs):
+        module = types.ModuleType("sample_plugin")
+        for name, value in attrs.items():
+            setattr(module, name, value)
+        return module
+
+    def test_registers_tools_hooks_and_skills_with_summary(self) -> None:
+        @hpk.hook("pre_llm_call")
+        def callback(**kwargs):
+            return kwargs
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text("# Skill\n")
+            skill = hpk.plugin_skill(
+                "temporal-awareness", skill_path, "Use local timing context."
+            )
+            ctx = FakePluginCtx()
+            module = self._module(callback=callback, sample_read=sample_read)
+            with self.assertLogs(level="INFO") as cap:
+                summary = hpk.register_plugin(ctx, module, skills=(skill,))
+
+        self.assertEqual(summary.tools, ("sample_read_thread",))
+        self.assertEqual(summary.hooks, ("pre_llm_call",))
+        self.assertEqual(summary.skills, ("temporal-awareness",))
+        self.assertEqual(summary.skipped_optional_skills, ())
+        self.assertEqual(ctx.hooks, [("pre_llm_call", callback)])
+        self.assertEqual(ctx.skills[0]["name"], "temporal-awareness")
+        self.assertIn("tools=sample_read_thread", "\n".join(cap.output))
+        self.assertIn("hooks=pre_llm_call", "\n".join(cap.output))
+        self.assertIn("skills=temporal-awareness", "\n".join(cap.output))
+
+    def test_missing_optional_skill_is_skipped_with_warning(self) -> None:
+        ctx = FakePluginCtx()
+        skill = hpk.plugin_skill("optional", "/missing/SKILL.md", "Optional", optional=True)
+        with self.assertLogs(level="WARNING"):
+            summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
+        self.assertEqual(summary.skipped_optional_skills, ("optional",))
+        self.assertEqual(ctx.skills, [])
+
+    def test_missing_required_skill_raises(self) -> None:
+        skill = hpk.plugin_skill("required", "/missing/SKILL.md", "Required")
+        with self.assertRaises(FileNotFoundError):
+            hpk.register_plugin(FakePluginCtx(), self._module(), skills=(skill,))
+
+    def test_validates_skill_name_path_and_description(self) -> None:
+        for args in [
+            ("bad:name", "SKILL.md", "Description"),
+            ("good", "README.md", "Description"),
+            ("good", "SKILL.md", ""),
+        ]:
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                hpk.plugin_skill(*args)
+
+    def test_rejects_duplicate_hook_names(self) -> None:
+        @hpk.hook("pre_llm_call")
+        def first(**kwargs):
+            return None
+
+        @hpk.hook("pre_llm_call")
+        def second(**kwargs):
+            return None
+
+        with self.assertRaisesRegex(ValueError, "duplicate hook"):
+            hpk.register_plugin(
+                FakePluginCtx(), self._module(first=first, second=second)
+            )
+
+    def test_rejects_duplicate_skill_names(self) -> None:
+        skills = (
+            hpk.plugin_skill("same", "one/SKILL.md", "First", optional=True),
+            hpk.plugin_skill("same", "two/SKILL.md", "Second", optional=True),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate skill"):
+            hpk.register_plugin(FakePluginCtx(), self._module(), skills=skills)
 
 
 if __name__ == "__main__":
