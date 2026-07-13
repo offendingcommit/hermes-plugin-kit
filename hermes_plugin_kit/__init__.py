@@ -59,6 +59,7 @@ __all__ = [
     "hook",
     "plugin_skill",
     "register_plugin",
+    "PluginSkill",
     "RegistrationSummary",
     "register_all",
     "build_schema",
@@ -298,11 +299,11 @@ def hook(name: str) -> Callable:
         @functools.wraps(fn)
         def wrapper(**kwargs: Any) -> Any:
             started = time.perf_counter()
-            context = _safe_context(kwargs)
+            context = _truncate(_safe_context(kwargs))
             log.debug(
                 "%s: invoked; context=%s",
                 hook_name,
-                _truncate(context),
+                context,
             )
             try:
                 result = fn(**kwargs)
@@ -312,7 +313,7 @@ def hook(name: str) -> Callable:
                     hook_name,
                     (time.perf_counter() - started) * 1000,
                     type(exc).__name__,
-                    _truncate(context),
+                    context,
                 )
                 raise
             log.info(
@@ -320,7 +321,7 @@ def hook(name: str) -> Callable:
                 hook_name,
                 (time.perf_counter() - started) * 1000,
                 type(result).__name__,
-                _truncate(context),
+                context,
             )
             return result
 
@@ -383,11 +384,7 @@ def tool(
             args = args or {}
             started = time.perf_counter()
             safe_args = _truncate(_redacted_args(args))
-            context = {
-                key: kwargs[key]
-                for key in ("session_id", "task_id")
-                if kwargs.get(key) is not None
-            }
+            context = _safe_context(kwargs)
             log.debug(
                 "%s: invoked; args=%s; context=%s",
                 tool_name,
@@ -473,15 +470,7 @@ def register_all(ctx: Any, module: Any) -> int:
         if not spec or spec["name"] in seen:
             continue
         seen.add(spec["name"])
-        ctx.register_tool(
-            name=spec["name"],
-            toolset=spec["toolset"],
-            schema=spec["schema"],
-            handler=obj,
-            requires_env=spec["requires_env"],
-            description=spec["schema"]["description"],
-            emoji=spec["emoji"],
-        )
+        _register_tool(ctx, obj, spec)
         count += 1
     log.info(
         "hermes_plugin_kit: registered %d tool(s); names=%s",
@@ -489,6 +478,19 @@ def register_all(ctx: Any, module: Any) -> int:
         ",".join(sorted(seen)) or "<none>",
     )
     return count
+
+
+def _register_tool(ctx: Any, handler: Callable, spec: dict[str, Any]) -> None:
+    """Bind one kit-decorated tool to the current Hermes plugin context."""
+    ctx.register_tool(
+        name=spec["name"],
+        toolset=spec["toolset"],
+        schema=spec["schema"],
+        handler=handler,
+        requires_env=spec["requires_env"],
+        description=spec["schema"]["description"],
+        emoji=spec["emoji"],
+    )
 
 
 def register_plugin(
@@ -535,15 +537,7 @@ def register_plugin(
     for name in sorted(tools):
         obj = tools[name]
         spec = getattr(obj, _SPEC_ATTR)
-        ctx.register_tool(
-            name=spec["name"],
-            toolset=spec["toolset"],
-            schema=spec["schema"],
-            handler=obj,
-            requires_env=spec["requires_env"],
-            description=spec["schema"]["description"],
-            emoji=spec["emoji"],
-        )
+        _register_tool(ctx, obj, spec)
         registered_tools.append(name)
 
     registered_hooks: list[str] = []
