@@ -281,9 +281,21 @@ class RegisterPluginTests(unittest.TestCase):
         self.assertEqual(ctx.skills, [])
 
     def test_missing_required_skill_raises(self) -> None:
+        @hpk.hook("pre_llm_call")
+        def callback(**kwargs):
+            return kwargs
+
+        ctx = FakePluginCtx()
         skill = hpk.plugin_skill("required", "/missing/SKILL.md", "Required")
         with self.assertRaises(FileNotFoundError):
-            hpk.register_plugin(FakePluginCtx(), self._module(), skills=(skill,))
+            hpk.register_plugin(
+                ctx,
+                self._module(callback=callback, sample_read=sample_read),
+                skills=(skill,),
+            )
+        self.assertEqual(ctx.tools, [])
+        self.assertEqual(ctx.hooks, [])
+        self.assertEqual(ctx.skills, [])
 
     def test_validates_skill_name_path_and_description(self) -> None:
         for args in [
@@ -307,6 +319,22 @@ class RegisterPluginTests(unittest.TestCase):
             hpk.register_plugin(
                 FakePluginCtx(), self._module(first=first, second=second)
             )
+
+    def test_rejects_duplicate_tool_names(self) -> None:
+        @hpk.tool(toolset="sample", name="sample_duplicate")
+        def first(args, **kwargs):
+            """First duplicate tool."""
+            return {}
+
+        @hpk.tool(toolset="sample", name="sample_duplicate")
+        def second(args, **kwargs):
+            """Second duplicate tool."""
+            return {}
+
+        ctx = FakePluginCtx()
+        with self.assertRaisesRegex(ValueError, "duplicate tool"):
+            hpk.register_plugin(ctx, self._module(first=first, second=second))
+        self.assertEqual(ctx.tools, [])
 
     def test_rejects_duplicate_skill_names(self) -> None:
         skills = (

@@ -18,8 +18,8 @@ jobs:
 
   # Validate the kit against the *real* hermes-agent source so it can't silently
   # drift from upstream. Checks out NousResearch/hermes-agent and points the
-  # contract tests at it; they skip if the import fails, so this never blocks on
-  # an upstream layout change — it goes red only on a genuine contract break.
+  # contract tests at it; explicit checkout import or layout drift fails this
+  # job so an upstream contract break cannot become a misleading skipped green.
   hermes-contract:
     runs-on: ubuntu-latest
     steps:

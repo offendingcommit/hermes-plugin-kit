@@ -533,6 +533,22 @@ def register_plugin(
             raise ValueError(f"duplicate skill name: {skill.name}")
         declared_skills[skill.name] = skill
 
+    available_skills: list[PluginSkill] = []
+    skipped_skills: list[str] = []
+    for name in sorted(declared_skills):
+        skill = declared_skills[name]
+        if skill.path.is_file():
+            available_skills.append(skill)
+            continue
+        if not skill.optional:
+            raise FileNotFoundError(f"SKILL.md not found at {skill.path}")
+        log.warning(
+            "hermes_plugin_kit: optional skill missing; name=%s; path=%s",
+            skill.name,
+            skill.path,
+        )
+        skipped_skills.append(name)
+
     registered_tools: list[str] = []
     for name in sorted(tools):
         obj = tools[name]
@@ -546,25 +562,13 @@ def register_plugin(
         registered_hooks.append(name)
 
     registered_skills: list[str] = []
-    skipped_skills: list[str] = []
-    for name in sorted(declared_skills):
-        skill = declared_skills[name]
-        if not skill.path.is_file():
-            if skill.optional:
-                log.warning(
-                    "hermes_plugin_kit: optional skill missing; name=%s; path=%s",
-                    skill.name,
-                    skill.path,
-                )
-                skipped_skills.append(name)
-                continue
-            raise FileNotFoundError(f"SKILL.md not found at {skill.path}")
+    for skill in available_skills:
         ctx.register_skill(
             name=skill.name,
             path=skill.path,
             description=skill.description,
         )
-        registered_skills.append(name)
+        registered_skills.append(skill.name)
 
     summary = RegistrationSummary(
         tools=tuple(registered_tools),
