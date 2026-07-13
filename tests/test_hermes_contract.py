@@ -27,26 +27,50 @@ import hermes_plugin_kit as hpk
 
 
 def _import_real_hermes():
-    """Return a namespace with the real PluginContext / VALID_HOOKS / registry, or None."""
+    """Return real plugin runtime APIs, failing when an explicit checkout is invalid."""
     candidates: list[Path] = []
     env_path = os.environ.get("HERMES_AGENT_PATH")
     if env_path:
-        candidates.append(Path(env_path))
+        explicit_root = Path(env_path)
+        if not (explicit_root / "hermes_cli" / "plugins.py").exists():
+            raise FileNotFoundError(
+                f"HERMES_AGENT_PATH has no hermes_cli/plugins.py: {explicit_root}"
+            )
+        sys.path.insert(0, str(explicit_root))
     candidates.append(Path.home() / "hermes-agent")
     candidates.append(Path.home() / ".hermes" / "hermes-agent")
 
     def _try():
-        from hermes_cli.plugins import PluginContext, VALID_HOOKS  # type: ignore
+        from hermes_cli.plugins import (  # type: ignore
+            PluginContext,
+            PluginManager,
+            PluginManifest,
+            VALID_HOOKS,
+        )
         from tools.registry import registry  # type: ignore
 
+        # A stale checkout that predates plugin-owned skills is not the
+        # lifecycle contract this suite is intended to certify.
+        if not hasattr(PluginContext, "register_skill"):
+            raise ImportError("hermes-agent PluginContext.register_skill is unavailable")
+        if not hasattr(PluginManager, "find_plugin_skill"):
+            raise ImportError("hermes-agent PluginManager.find_plugin_skill is unavailable")
+
         return types.SimpleNamespace(
-            PluginContext=PluginContext, VALID_HOOKS=set(VALID_HOOKS), registry=registry
+            PluginContext=PluginContext,
+            PluginManager=PluginManager,
+            PluginManifest=PluginManifest,
+            VALID_HOOKS=set(VALID_HOOKS),
+            registry=registry,
         )
 
     try:
         return _try()
     except Exception:
-        pass
+        if env_path:
+            # An explicit contract checkout is authoritative in CI. Do not turn
+            # import or layout drift into a misleading skipped-green build.
+            raise
 
     for root in candidates:
         if not (root / "hermes_cli" / "plugins.py").exists():
@@ -143,6 +167,46 @@ class HermesContractTests(unittest.TestCase):
                 sig.bind(None, **call)  # None stands in for self
             except TypeError as exc:  # pragma: no cover - failure path
                 self.fail(f"register_all call does not match PluginContext.register_tool: {exc}")
+
+    def test_lifecycle_registration_invokes_hook_and_resolves_qualified_skill(self) -> None:
+        @hpk.hook("pre_llm_call")
+        def contract_hook(**kwargs):
+            return {"context": kwargs["message"]}
+
+        module = types.ModuleType("contract_lifecycle_plugin")
+        module.contract_hook = contract_hook
+        manager = _REAL.PluginManager()
+        manifest = _REAL.PluginManifest(name="contract-plugin")
+        ctx = _REAL.PluginContext(manifest, manager)
+
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "SKILL.md"
+            path.write_text("# Contract skill\n")
+            summary = hpk.register_plugin(
+                ctx,
+                module,
+                skills=(hpk.plugin_skill("probe", path, "Contract probe"),),
+            )
+            self.assertEqual(summary.hooks, ("pre_llm_call",))
+            self.assertEqual(
+                manager.invoke_hook("pre_llm_call", message="gateway-shaped"),
+                [{"context": "gateway-shaped"}],
+            )
+            self.assertEqual(manager.find_plugin_skill("contract-plugin:probe"), path)
+
+    def test_lifecycle_calls_bind_to_real_plugincontext_signatures(self) -> None:
+        hook_sig = inspect.signature(_REAL.PluginContext.register_hook)
+        hook_sig.bind(None, "pre_llm_call", lambda **kwargs: None)
+
+        skill_sig = inspect.signature(_REAL.PluginContext.register_skill)
+        skill_sig.bind(
+            None,
+            name="probe",
+            path=Path("SKILL.md"),
+            description="Probe",
+        )
 
 
 if __name__ == "__main__":
