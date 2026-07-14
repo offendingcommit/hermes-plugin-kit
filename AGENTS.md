@@ -9,6 +9,9 @@ plugin.
 
 - Keep `@tool` and `register_all` backward compatible. Use `@hook`,
   `plugin_skill`, and `register_plugin` for full plugin lifecycle registration.
+- Use `invoke_host_tool` for host-managed capabilities such as `send_message`;
+  do not assume every Hermes capability is registered in `tools.registry`.
+  Nested host calls must remain visible to `pre_tool_call` and `post_tool_call`.
 - Use `tool_name(namespace, verb, noun)` for new tools and prefer explicit
   verbs such as `read`, `write`, and `patch`. Do not use Hermes agent-loop
   names (`memory`, `todo`, `session_search`, `delegate_task`) as plugin tools.
