@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 import hermes_plugin_kit as hpk
 
@@ -237,6 +239,84 @@ class HookBehaviorTests(unittest.TestCase):
     def test_hook_name_is_required(self) -> None:
         with self.assertRaisesRegex(ValueError, "hook name"):
             hpk.hook("")
+
+
+class HostToolInvocationTests(unittest.TestCase):
+    def _runtime_modules(self, *, block_message=None, result='{"success": true}'):
+        plugins = types.ModuleType("hermes_cli.plugins")
+        plugins.resolve_pre_tool_block = Mock(return_value=block_message)
+        plugins.has_hook = Mock(return_value=True)
+        plugins.invoke_hook = Mock(return_value=[])
+
+        hermes_cli = types.ModuleType("hermes_cli")
+        hermes_cli.plugins = plugins
+
+        send_message = types.ModuleType("tools.send_message_tool")
+        send_message.send_message_tool = Mock(return_value=result)
+        tools_package = types.ModuleType("tools")
+        tools_package.__path__ = []
+        tools_package.send_message_tool = send_message
+
+        modules = {
+            "hermes_cli": hermes_cli,
+            "hermes_cli.plugins": plugins,
+            "tools": tools_package,
+            "tools.send_message_tool": send_message,
+        }
+        return modules, plugins, send_message.send_message_tool
+
+    def test_invokes_non_registry_host_tool_through_plugin_hooks(self) -> None:
+        modules, plugins, handler = self._runtime_modules()
+        args = {
+            "action": "send",
+            "target": "telegram:8670382527",
+            "message": "MEDIA:/opt/data/avatars/generated/portrait.png",
+        }
+
+        with patch.dict(sys.modules, modules):
+            result = hpk.invoke_host_tool(
+                "send_message",
+                args,
+                session_id="session-1",
+                task_id="task-1",
+            )
+
+        self.assertEqual(json.loads(result), {"success": True})
+        plugins.resolve_pre_tool_block.assert_called_once_with(
+            "send_message",
+            args,
+            task_id="task-1",
+            session_id="session-1",
+            tool_call_id="",
+            turn_id="",
+            api_request_id="",
+        )
+        handler.assert_called_once_with(args, session_id="session-1", task_id="task-1")
+        post_call = plugins.invoke_hook.call_args
+        self.assertEqual(post_call.args, ("post_tool_call",))
+        self.assertEqual(post_call.kwargs["tool_name"], "send_message")
+        self.assertEqual(post_call.kwargs["status"], "success")
+
+    def test_blocked_host_tool_does_not_reach_handler(self) -> None:
+        modules, _plugins, handler = self._runtime_modules(
+            block_message="Outbound messaging is guarded"
+        )
+
+        with patch.dict(sys.modules, modules):
+            result = hpk.invoke_host_tool(
+                "send_message",
+                {"action": "send", "target": "telegram", "message": "hello"},
+            )
+
+        self.assertEqual(
+            json.loads(result),
+            {"error": "Outbound messaging is guarded"},
+        )
+        handler.assert_not_called()
+
+    def test_rejects_unknown_host_tool(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unsupported host tool"):
+            hpk.invoke_host_tool("not_a_host_tool", {})
 
 
 class RegisterPluginTests(unittest.TestCase):

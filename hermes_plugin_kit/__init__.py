@@ -17,6 +17,8 @@ for you, so the classes of bug that bite hand-written plugins cannot recur:
 - **Envelope + safety** — a handler returns a plain ``dict`` (or raises); the kit
   encodes the JSON string, wraps exceptions, and always returns ``str`` from an
   ``(args, **kwargs)`` signature, exactly as the registry requires.
+- **Host invocation** — ``invoke_host_tool`` reaches supported Hermes runtime
+  services that are not registry-backed while preserving tool lifecycle hooks.
 
 Usage::
 
@@ -44,6 +46,7 @@ Usage::
 from __future__ import annotations
 
 import functools
+import importlib
 import inspect
 import json
 import logging
@@ -59,6 +62,7 @@ __all__ = [
     "hook",
     "plugin_skill",
     "register_plugin",
+    "invoke_host_tool",
     "PluginSkill",
     "RegistrationSummary",
     "register_all",
@@ -79,6 +83,16 @@ _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _AGENT_LOOP_TOOL_NAMES = frozenset({"todo", "memory", "session_search", "delegate_task"})
 _RESERVED_NAMESPACE_PREFIXES = ("memory_",)
 _SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+_HOST_TOOL_IMPORTS = {
+    "send_message": ("tools.send_message_tool", "send_message_tool"),
+}
+_HOOK_CONTEXT_KEYS = (
+    "task_id",
+    "session_id",
+    "tool_call_id",
+    "turn_id",
+    "api_request_id",
+)
 
 
 @dataclass(frozen=True)
@@ -346,6 +360,143 @@ def plugin_skill(
     if not isinstance(description, str) or not description.strip():
         raise ValueError("skill description is required")
     return PluginSkill(name, skill_path, description.strip(), bool(optional))
+
+
+def _load_host_tool(name: str) -> Callable:
+    target = _HOST_TOOL_IMPORTS.get(name)
+    if target is None:
+        raise ValueError(
+            f"unsupported host tool {name!r}; supported: "
+            f"{', '.join(sorted(_HOST_TOOL_IMPORTS))}"
+        )
+    module_name, handler_name = target
+    module = importlib.import_module(module_name)
+    handler = getattr(module, handler_name, None)
+    if not callable(handler):
+        raise RuntimeError(
+            f"Hermes host tool {name!r} has no callable {module_name}.{handler_name}"
+        )
+    return handler
+
+
+def _host_result_fields(result: str) -> tuple[str, str | None, str | None]:
+    try:
+        payload = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        return "success", None, None
+    if not isinstance(payload, dict):
+        return "success", None, None
+    error = payload.get("error")
+    failed = payload.get("success") is False or payload.get("ok") is False
+    if error is not None or failed:
+        message = str(error or "host tool returned an unsuccessful result")
+        return "error", "host_tool_error", message
+    return "success", None, None
+
+
+def _emit_host_post_tool_call(
+    name: str,
+    args: dict,
+    result: str,
+    *,
+    duration_ms: int,
+    status: str,
+    error_type: str | None,
+    error_message: str | None,
+    context: dict[str, Any],
+) -> None:
+    try:
+        from hermes_cli.plugins import has_hook, invoke_hook
+
+        if not has_hook("post_tool_call"):
+            return
+        hook_context = {key: context.get(key) or "" for key in _HOOK_CONTEXT_KEYS}
+        invoke_hook(
+            "post_tool_call",
+            tool_name=name,
+            args=args,
+            result=result,
+            duration_ms=duration_ms,
+            status=status,
+            error_type=error_type,
+            error_message=error_message,
+            **hook_context,
+        )
+    except Exception:
+        logging.getLogger("hermes_plugin_kit").warning(
+            "%s: post_tool_call hook failed after host invocation",
+            name,
+            exc_info=True,
+        )
+
+
+def invoke_host_tool(name: str, args: dict | None = None, **context: Any) -> str:
+    """Invoke a Hermes host capability that is not registry-backed.
+
+    Some Hermes capabilities, notably ``send_message``, are runtime services
+    rather than entries in ``tools.registry``. Plugin handlers must use this
+    seam instead of ``registry.dispatch`` so the direct host handler is found
+    while ``pre_tool_call`` and ``post_tool_call`` hooks still observe the
+    nested operation.
+    """
+    handler = _load_host_tool(name)
+    tool_args = {} if args is None else args
+    if not isinstance(tool_args, dict):
+        raise TypeError("host tool args must be a dict")
+
+    try:
+        from hermes_cli.plugins import resolve_pre_tool_block
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "Hermes pre_tool_call guard API is unavailable; host invocation refused"
+        ) from exc
+
+    hook_context = {key: context.get(key) or "" for key in _HOOK_CONTEXT_KEYS}
+    block_message = resolve_pre_tool_block(name, tool_args, **hook_context)
+    if block_message is not None:
+        result = json.dumps({"error": str(block_message)}, ensure_ascii=False)
+        _emit_host_post_tool_call(
+            name,
+            tool_args,
+            result,
+            duration_ms=0,
+            status="blocked",
+            error_type="plugin_block",
+            error_message=str(block_message),
+            context=context,
+        )
+        return result
+
+    started = time.perf_counter()
+    try:
+        result = handler(tool_args, **context)
+    except Exception as exc:
+        logging.getLogger("hermes_plugin_kit").exception(
+            "%s: host handler raised; error_type=%s",
+            name,
+            type(exc).__name__,
+        )
+        result = json.dumps(
+            {"error": f"{name} host handler failed: {type(exc).__name__}"},
+            ensure_ascii=False,
+        )
+    if not isinstance(result, str):
+        result = json.dumps(result, ensure_ascii=False)
+
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    status, error_type, error_message = _host_result_fields(result)
+    _emit_host_post_tool_call(
+        name,
+        tool_args,
+        result,
+        duration_ms=duration_ms,
+        status=status,
+        error_type=error_type,
+        error_message=error_message,
+        context=context,
+    )
+    return result
+
 
 def tool(
     *,

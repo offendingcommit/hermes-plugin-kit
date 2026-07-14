@@ -22,6 +22,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import hermes_plugin_kit as hpk
 
@@ -207,6 +208,25 @@ class HermesContractTests(unittest.TestCase):
             path=Path("SKILL.md"),
             description="Probe",
         )
+
+    def test_host_tool_invocation_uses_real_non_registry_handler(self) -> None:
+        from tools import send_message_tool  # type: ignore
+
+        expected = '{"success": true, "message_id": "contract-probe"}'
+        args = {
+            "action": "send",
+            "target": "telegram:8670382527",
+            "message": "MEDIA:/opt/data/avatars/generated/contract-probe.png",
+        }
+        with patch.object(
+            send_message_tool,
+            "send_message_tool",
+            return_value=expected,
+        ) as handler:
+            result = hpk.invoke_host_tool("send_message", args)
+
+        self.assertEqual(result, expected)
+        handler.assert_called_once_with(args)
 
 
 if __name__ == "__main__":

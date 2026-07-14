@@ -58,6 +58,8 @@ the same boilerplate. `hermes-plugin-kit` makes them structurally impossible:
 - **Envelope + safety** — return a plain `dict` (or raise); the kit encodes the JSON
   string, catches exceptions, and always returns `str` from an `(args, **kwargs)`
   handler.
+- **Host invocation** — call non-registry Hermes capabilities such as
+  `send_message` without bypassing plugin guard and audit hooks.
 
 ## Who it's for
 
@@ -193,6 +195,34 @@ passes through verbatim into the JSON Schema for that property.
 A handler returns a `dict` (becomes the success `data`), or raises (becomes a tool
 error), or returns a `str` as an escape hatch (treated as already-encoded JSON). It must
 accept `(args, **kwargs)` — runtime keys like `task_id`/`session_id` arrive as kwargs.
+
+## Calling host-managed capabilities
+
+Not every Hermes capability lives in `tools.registry`. In particular,
+`send_message` is a host-managed runtime service, so calling
+`registry.dispatch("send_message", ...)` from inside a plugin returns an unknown-tool
+error. Use the kit's host invocation seam instead:
+
+```python
+from hermes_plugin_kit import invoke_host_tool
+
+def deliver_generated_image(path: str, target: str, **runtime_context):
+    return invoke_host_tool(
+        "send_message",
+        {
+            "action": "send",
+            "target": target,
+            "message": f"MEDIA:{path}",
+        },
+        **runtime_context,
+    )
+```
+
+`invoke_host_tool` resolves the supported direct host handler and wraps the nested
+operation with Hermes `pre_tool_call` and `post_tool_call` hooks. A blocking hook
+prevents the handler from running. If the guard API is unavailable, invocation is
+refused rather than sending without policy checks. `send_message` is the currently
+supported host tool; unknown names fail explicitly.
 
 ## Logging contract
 
