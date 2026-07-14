@@ -224,6 +224,11 @@ prevents the handler from running. If the guard API is unavailable, invocation i
 refused rather than sending without policy checks. `send_message` is the currently
 supported host tool; unknown names fail explicitly.
 
+The upstream Hermes contract suite runs this exact generated-image payload through
+the real `send_message` target parser, media extractor, and Telegram formatter. It
+mocks only the final Bot API client and asserts that Hermes calls `send_photo` with
+the numeric chat ID and generated file, without emitting a separate text message.
+
 ## Logging contract
 
 The kit logs under the decorated handler's module logger, so each plugin can

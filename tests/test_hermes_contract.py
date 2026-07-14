@@ -5,7 +5,9 @@ These keep the kit relevant: they import the genuine ``PluginContext`` and tool
 satisfies the runtime contract — most importantly that a kit-built schema, run
 through the registry's real OpenAI-tool conversion, yields a function whose
 ``parameters`` are populated (the empty-``{}`` failure mode this kit exists to
-prevent).
+prevent). The host-tool contract also sends the exact generated-image payload
+through Hermes' real target parser, media extractor, and Telegram formatter,
+mocking only the final Bot API client.
 
 The whole module is skipped when hermes-agent is not importable, so the suite
 stays green standalone and in public CI. Point it at a checkout with
@@ -22,7 +24,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import hermes_plugin_kit as hpk
 
@@ -209,24 +211,120 @@ class HermesContractTests(unittest.TestCase):
             description="Probe",
         )
 
-    def test_host_tool_invocation_uses_real_non_registry_handler(self) -> None:
-        from tools import send_message_tool  # type: ignore
+    def test_host_tool_invocation_reaches_real_telegram_photo_contract(self) -> None:
+        """Exercise Hermes parsing and Telegram formatting without network I/O."""
+        import asyncio
+        from tempfile import TemporaryDirectory
 
-        expected = '{"success": true, "message_id": "contract-probe"}'
-        args = {
-            "action": "send",
-            "target": "telegram:8670382527",
-            "message": "MEDIA:/opt/data/avatars/generated/contract-probe.png",
-        }
-        with patch.object(
-            send_message_tool,
-            "send_message_tool",
-            return_value=expected,
-        ) as handler:
-            result = hpk.invoke_host_tool("send_message", args)
+        from gateway import config as gateway_config  # type: ignore
+        from gateway.config import Platform  # type: ignore
+        from tools import interrupt as interrupt_module  # type: ignore
 
-        self.assertEqual(result, expected)
-        handler.assert_called_once_with(args)
+        telegram_config = types.SimpleNamespace(
+            enabled=True,
+            token="contract-token",
+            extra={},
+        )
+        config = types.SimpleNamespace(
+            platforms={Platform.TELEGRAM: telegram_config},
+            get_home_channel=lambda _platform: None,
+        )
+
+        bot = types.SimpleNamespace(
+            send_message=AsyncMock(),
+            send_photo=AsyncMock(
+                return_value=types.SimpleNamespace(message_id=42)
+            ),
+            send_video=AsyncMock(),
+            send_voice=AsyncMock(),
+            send_audio=AsyncMock(),
+            send_document=AsyncMock(),
+        )
+        bot_factory = Mock(return_value=bot)
+
+        telegram_module = types.ModuleType("telegram")
+        telegram_module.Bot = bot_factory
+        telegram_constants = types.ModuleType("telegram.constants")
+        telegram_constants.ParseMode = types.SimpleNamespace(
+            HTML="HTML",
+            MARKDOWN_V2="MarkdownV2",
+        )
+        telegram_module.constants = telegram_constants
+
+        class TelegramAdapter:
+            MAX_MESSAGE_LENGTH = 4096
+
+            @staticmethod
+            def format_message(message: str) -> str:
+                return message
+
+        telegram_adapter = types.ModuleType("plugins.platforms.telegram.adapter")
+        telegram_adapter.TelegramAdapter = TelegramAdapter
+        telegram_adapter.register = Mock()
+
+        model_tools = types.ModuleType("model_tools")
+        model_tools._run_async = asyncio.run
+        mirror = types.ModuleType("gateway.mirror")
+        mirror.mirror_to_session = Mock(return_value=False)
+        session_context = types.ModuleType("gateway.session_context")
+        session_context.get_session_env = Mock(return_value="")
+
+        with TemporaryDirectory() as tmp:
+            image_path = Path(tmp) / "avatars" / "generated" / "contract-probe.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+            args = {
+                "action": "send",
+                "target": "telegram:8670382527",
+                "message": f"MEDIA:{image_path}",
+            }
+
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "telegram": telegram_module,
+                        "telegram.constants": telegram_constants,
+                        "plugins.platforms.telegram.adapter": telegram_adapter,
+                        "model_tools": model_tools,
+                        "gateway.mirror": mirror,
+                        "gateway.session_context": session_context,
+                    },
+                ),
+                patch.dict(
+                    os.environ,
+                    {
+                        "HERMES_MEDIA_DELIVERY_STRICT": "0",
+                        "TELEGRAM_PROXY": "",
+                    },
+                    clear=False,
+                ),
+                patch.object(
+                    gateway_config,
+                    "load_gateway_config",
+                    return_value=config,
+                ),
+                patch.object(
+                    interrupt_module,
+                    "is_interrupted",
+                    return_value=False,
+                ),
+            ):
+                result = json.loads(hpk.invoke_host_tool("send_message", args))
+
+            self.assertTrue(result.get("success"), result)
+            self.assertEqual(result["platform"], "telegram")
+            self.assertEqual(result["chat_id"], "8670382527")
+            self.assertEqual(result["message_id"], "42")
+            bot_factory.assert_called_once_with(token="contract-token")
+            bot.send_message.assert_not_awaited()
+            bot.send_photo.assert_awaited_once()
+            photo_call = bot.send_photo.await_args
+            self.assertEqual(photo_call.kwargs["chat_id"], 8670382527)
+            self.assertEqual(
+                photo_call.kwargs["photo"].name,
+                str(image_path.resolve()),
+            )
 
 
 if __name__ == "__main__":
