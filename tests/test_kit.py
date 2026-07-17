@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import hermes_plugin_kit as hpk
 
@@ -335,6 +336,30 @@ class MediaDeliveryContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ogg or opus"):
             hpk.MediaPayload("/opt/data/voice-staging/memo.mp3", hpk.MediaType.VOICE)
 
+    def test_spoiler_image_keeps_standard_hermes_media_directive(self) -> None:
+        payload = hpk.MediaPayload(
+            "/opt/data/avatars/generated/portrait.png",
+            hpk.MediaType.AUTO,
+            spoiler=True,
+        )
+
+        self.assertTrue(payload.spoiler)
+        self.assertEqual(
+            payload.to_message(),
+            "MEDIA:/opt/data/avatars/generated/portrait.png",
+        )
+
+    def test_spoiler_rejects_non_image_media(self) -> None:
+        for path, media_type in (
+            ("/opt/data/voice-staging/memo.ogg", hpk.MediaType.VOICE),
+            ("/opt/data/report.pdf", hpk.MediaType.DOCUMENT),
+            ("/opt/data/video.mp4", hpk.MediaType.AUTO),
+        ):
+            with self.subTest(path=path), self.assertRaisesRegex(
+                ValueError, "spoiler media must be an image"
+            ):
+                hpk.MediaPayload(path, media_type, spoiler=True)
+
     def test_origin_target_uses_task_local_gateway_route(self) -> None:
         session_context = types.ModuleType("gateway.session_context")
         values = {
@@ -431,6 +456,175 @@ class MediaDeliveryContractTests(unittest.TestCase):
         self.assertEqual(result.display_target, "telegram:…2527")
         self.assertEqual(result.host_result["chat_id"], "…2527")
         self.assertEqual(result.as_dict()["media_type"], "voice")
+
+    def test_spoiler_delivery_uses_guarded_telegram_transport(self) -> None:
+        plugins = types.ModuleType("hermes_cli.plugins")
+        plugins.resolve_pre_tool_block = Mock(return_value=None)
+        plugins.has_hook = Mock(return_value=True)
+        plugins.invoke_hook = Mock(return_value=[])
+        hermes_cli = types.ModuleType("hermes_cli")
+        hermes_cli.plugins = plugins
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "portrait.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+            payload = hpk.MediaPayload(path, spoiler=True)
+            with (
+                patch.dict(
+                    sys.modules,
+                    {"hermes_cli": hermes_cli, "hermes_cli.plugins": plugins},
+                ),
+                patch.object(
+                    hpk,
+                    "_deliver_telegram_spoiler",
+                    return_value={
+                        "success": True,
+                        "platform": "telegram",
+                        "chat_id": "8670382527",
+                        "message_id": "9",
+                    },
+                ) as spoiler_send,
+                patch.object(hpk, "invoke_host_tool") as host_send,
+            ):
+                result = hpk.deliver_media(
+                    payload,
+                    target="telegram:8670382527",
+                    session_id="session-1",
+                    task_id="task-1",
+                )
+
+        host_send.assert_not_called()
+        spoiler_send.assert_called_once()
+        self.assertEqual(spoiler_send.call_args.args[0], payload)
+        self.assertEqual(
+            spoiler_send.call_args.args[1].host_target,
+            "telegram:8670382527",
+        )
+        guard_args = plugins.resolve_pre_tool_block.call_args.args[1]
+        self.assertEqual(guard_args["target"], "telegram:8670382527")
+        self.assertEqual(guard_args["message"], f"MEDIA:{path}")
+        self.assertEqual(guard_args["media_options"], {"spoiler": True})
+        self.assertTrue(result.success)
+        self.assertTrue(result.spoiler)
+        self.assertEqual(result.host_result["chat_id"], "…2527")
+        self.assertEqual(
+            plugins.invoke_hook.call_args.kwargs["status"],
+            "success",
+        )
+
+    def test_spoiler_delivery_respects_hermes_pre_tool_guard(self) -> None:
+        plugins = types.ModuleType("hermes_cli.plugins")
+        plugins.resolve_pre_tool_block = Mock(return_value="Outbound media blocked")
+        plugins.has_hook = Mock(return_value=True)
+        plugins.invoke_hook = Mock(return_value=[])
+        hermes_cli = types.ModuleType("hermes_cli")
+        hermes_cli.plugins = plugins
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "portrait.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+            with (
+                patch.dict(
+                    sys.modules,
+                    {"hermes_cli": hermes_cli, "hermes_cli.plugins": plugins},
+                ),
+                patch.object(hpk, "_deliver_telegram_spoiler") as spoiler_send,
+            ):
+                result = hpk.deliver_media(
+                    hpk.MediaPayload(path, spoiler=True),
+                    target="telegram:-5372910000",
+                    session_id="session-1",
+                )
+
+        spoiler_send.assert_not_called()
+        self.assertFalse(result.success)
+        self.assertEqual(result.host_result["error"], "Outbound media blocked")
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(
+                response_text="delivery failed",
+                session_id="session-1",
+            )
+        )
+
+    def test_spoiler_transport_forwards_group_topic_and_closes_bot(self) -> None:
+        bot = types.SimpleNamespace(
+            initialize=AsyncMock(),
+            send_photo=AsyncMock(
+                return_value=types.SimpleNamespace(message_id=42)
+            ),
+            shutdown=AsyncMock(),
+        )
+        telegram = types.ModuleType("telegram")
+        telegram.Bot = Mock(return_value=bot)
+        telegram_ids = types.ModuleType(
+            "plugins.platforms.telegram.telegram_ids"
+        )
+        telegram_ids.normalize_telegram_chat_id = lambda value: int(value)
+        adapter = types.ModuleType("plugins.platforms.telegram.adapter")
+        adapter.TelegramAdapter = types.SimpleNamespace(
+            _message_thread_id_for_send=lambda value: int(value)
+        )
+        gateway_config = types.ModuleType("gateway.config")
+        platform = types.SimpleNamespace(TELEGRAM="telegram")
+        gateway_config.Platform = platform
+        gateway_config.load_gateway_config = Mock(
+            return_value=types.SimpleNamespace(
+                platforms={
+                    "telegram": types.SimpleNamespace(
+                        enabled=True,
+                        token="contract-token",
+                        extra={},
+                    )
+                },
+                get_home_channel=lambda _platform: None,
+            )
+        )
+        gateway = types.ModuleType("gateway")
+        gateway.__path__ = []
+        gateway.config = gateway_config
+        plugins = types.ModuleType("plugins")
+        plugins.__path__ = []
+        platforms = types.ModuleType("plugins.platforms")
+        platforms.__path__ = []
+        telegram_package = types.ModuleType("plugins.platforms.telegram")
+        telegram_package.__path__ = []
+        model_tools = types.ModuleType("model_tools")
+        model_tools._run_async = asyncio.run
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "portrait.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+            payload = hpk.MediaPayload(path, caption="A reveal", spoiler=True)
+            resolved = hpk.ResolvedDeliveryTarget(
+                requested="origin",
+                host_target="telegram:-5372910000:42",
+                display="telegram:-…0000:42",
+            )
+            with patch.dict(
+                sys.modules,
+                {
+                    "telegram": telegram,
+                    "gateway": gateway,
+                    "gateway.config": gateway_config,
+                    "plugins": plugins,
+                    "plugins.platforms": platforms,
+                    "plugins.platforms.telegram": telegram_package,
+                    "plugins.platforms.telegram.adapter": adapter,
+                    "plugins.platforms.telegram.telegram_ids": telegram_ids,
+                    "model_tools": model_tools,
+                },
+            ):
+                result = hpk._deliver_telegram_spoiler(payload, resolved)
+
+        self.assertEqual(result["message_id"], "42")
+        telegram.Bot.assert_called_once_with(token="contract-token")
+        bot.initialize.assert_awaited_once()
+        bot.shutdown.assert_awaited_once()
+        photo_call = bot.send_photo.await_args.kwargs
+        self.assertEqual(photo_call["chat_id"], -5372910000)
+        self.assertEqual(photo_call["message_thread_id"], 42)
+        self.assertEqual(photo_call["caption"], "A reveal")
+        self.assertTrue(photo_call["has_spoiler"])
 
     def test_successful_delivery_suppresses_the_same_turn_final_response_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

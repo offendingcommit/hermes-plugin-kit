@@ -17,7 +17,10 @@ plugin.
   final network client rather than replacing the host handler.
 - Plugins must use `MediaPayload` + `deliver_media` for attachments. The kit
   owns Hermes media directives, task-local `origin` resolution, route redaction,
-  the typed result, and successful-send final-response suppression. Consumers
+  the typed result, successful-send final-response suppression, and the narrow
+  Telegram `spoiler=True` photo extension. Spoiler delivery must retain Hermes
+  pre/post-tool hooks, route privacy, topic forwarding, and explicit Bot client
+  shutdown; normal media must remain on host-managed `send_message`. Consumers
   must register `transform_media_delivery_output` as Hermes'
   `transform_llm_output` hook and `clear_media_delivery_state` as
   `on_session_end`; they must not recreate those contracts or substitute
