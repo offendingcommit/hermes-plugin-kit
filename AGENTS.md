@@ -17,7 +17,11 @@ plugin.
   final network client rather than replacing the host handler.
 - Plugins must use `MediaPayload` + `deliver_media` for attachments. The kit
   owns Hermes media directives, task-local `origin` resolution, route redaction,
-  and the typed result; consumers must not recreate those contracts.
+  the typed result, and successful-send final-response suppression. Consumers
+  must register `transform_media_delivery_output` as Hermes'
+  `transform_llm_output` hook and `clear_media_delivery_state` as
+  `on_session_end`; they must not recreate those contracts or substitute
+  OpenClaw response shapes.
 - Use `tool_name(namespace, verb, noun)` for new tools and prefer explicit
   verbs such as `read`, `write`, and `patch`. Do not use Hermes agent-loop
   names (`memory`, `todo`, `session_search`, `delegate_task`) as plugin tools.
