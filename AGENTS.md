@@ -15,6 +15,9 @@ plugin.
 - Keep host invocation grounded in the real Hermes contract suite. For media
   delivery, exercise target parsing and platform formatting and mock only the
   final network client rather than replacing the host handler.
+- Plugins must use `MediaPayload` + `deliver_media` for attachments. The kit
+  owns Hermes media directives, task-local `origin` resolution, route redaction,
+  and the typed result; consumers must not recreate those contracts.
 - Use `tool_name(namespace, verb, noun)` for new tools and prefer explicit
   verbs such as `read`, `write`, and `patch`. Do not use Hermes agent-loop
   names (`memory`, `todo`, `session_search`, `delegate_task`) as plugin tools.

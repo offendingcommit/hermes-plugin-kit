@@ -211,8 +211,8 @@ class HermesContractTests(unittest.TestCase):
             description="Probe",
         )
 
-    def test_host_tool_invocation_reaches_real_telegram_photo_contract(self) -> None:
-        """Exercise Hermes parsing and Telegram formatting without network I/O."""
+    def test_host_tool_invocation_reaches_real_telegram_media_contract(self) -> None:
+        """Exercise Hermes media parsing and Telegram formatting without network I/O."""
         import asyncio
         from tempfile import TemporaryDirectory
 
@@ -236,7 +236,9 @@ class HermesContractTests(unittest.TestCase):
                 return_value=types.SimpleNamespace(message_id=42)
             ),
             send_video=AsyncMock(),
-            send_voice=AsyncMock(),
+            send_voice=AsyncMock(
+                return_value=types.SimpleNamespace(message_id=43)
+            ),
             send_audio=AsyncMock(),
             send_document=AsyncMock(),
         )
@@ -273,6 +275,9 @@ class HermesContractTests(unittest.TestCase):
             image_path = Path(tmp) / "avatars" / "generated" / "contract-probe.png"
             image_path.parent.mkdir(parents=True)
             image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+            voice_path = Path(tmp) / "voice-staging" / "contract-probe.ogg"
+            voice_path.parent.mkdir(parents=True)
+            voice_path.write_bytes(b"OggS" + b"\x00" * 32)
             args = {
                 "action": "send",
                 "target": "telegram:8670382527",
@@ -311,19 +316,36 @@ class HermesContractTests(unittest.TestCase):
                 ),
             ):
                 result = json.loads(hpk.invoke_host_tool("send_message", args))
+                voice_result = hpk.deliver_media(
+                    hpk.MediaPayload(voice_path, hpk.MediaType.VOICE),
+                    target="telegram:8670382527",
+                )
 
             self.assertTrue(result.get("success"), result)
             self.assertEqual(result["platform"], "telegram")
             self.assertEqual(result["chat_id"], "8670382527")
             self.assertEqual(result["message_id"], "42")
-            bot_factory.assert_called_once_with(token="contract-token")
+            self.assertTrue(voice_result.success, voice_result)
+            self.assertEqual(voice_result.media_type, hpk.MediaType.VOICE)
+            self.assertEqual(voice_result.host_result["message_id"], "43")
+            self.assertEqual(bot_factory.call_count, 2)
+            self.assertTrue(
+                all(item.kwargs == {"token": "contract-token"} for item in bot_factory.call_args_list)
+            )
             bot.send_message.assert_not_awaited()
             bot.send_photo.assert_awaited_once()
+            bot.send_voice.assert_awaited_once()
             photo_call = bot.send_photo.await_args
             self.assertEqual(photo_call.kwargs["chat_id"], 8670382527)
             self.assertEqual(
                 photo_call.kwargs["photo"].name,
                 str(image_path.resolve()),
+            )
+            voice_call = bot.send_voice.await_args
+            self.assertEqual(voice_call.kwargs["chat_id"], 8670382527)
+            self.assertEqual(
+                voice_call.kwargs["voice"].name,
+                str(voice_path.resolve()),
             )
 
 

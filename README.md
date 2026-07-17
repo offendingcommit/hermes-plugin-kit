@@ -60,6 +60,11 @@ the same boilerplate. `hermes-plugin-kit` makes them structurally impossible:
   handler.
 - **Host invocation** — call non-registry Hermes capabilities such as
   `send_message` without bypassing plugin guard and audit hooks.
+- **Typed media delivery** — declare `MediaPayload` as `auto`, `voice`, or
+  `document`; resolve task-local `origin` inside the kit; and receive a
+  privacy-safe `MediaDeliveryResult` after the real Hermes-agent host send.
+  These types encode Hermes-agent's `send_message` contract; they are not an
+  OpenClaw compatibility layer.
 
 ## Who it's for
 
@@ -201,33 +206,38 @@ accept `(args, **kwargs)` — runtime keys like `task_id`/`session_id` arrive as
 Not every Hermes capability lives in `tools.registry`. In particular,
 `send_message` is a host-managed runtime service, so calling
 `registry.dispatch("send_message", ...)` from inside a plugin returns an unknown-tool
-error. Use the kit's host invocation seam instead:
+error. Use the kit's typed media seam instead:
 
 ```python
-from hermes_plugin_kit import invoke_host_tool
+from hermes_plugin_kit import MediaPayload, MediaType, deliver_media
 
-def deliver_generated_image(path: str, target: str, **runtime_context):
-    return invoke_host_tool(
-        "send_message",
-        {
-            "action": "send",
-            "target": target,
-            "message": f"MEDIA:{path}",
-        },
+def deliver_voice_memo(path: str, **runtime_context):
+    return deliver_media(
+        MediaPayload(path, MediaType.VOICE),
+        target="origin",
         **runtime_context,
     )
 ```
 
+`MediaType.VOICE` accepts only `.ogg`/`.opus` and emits Hermes'
+`[[audio_as_voice]]` directive. `MediaType.DOCUMENT` emits `[[as_document]]`;
+`MediaType.AUTO` lets Hermes choose from the extension. `origin` resolves
+through Hermes' task-local platform/chat/thread context inside the kit, so a
+plugin never imports gateway internals or exposes raw group IDs to the model.
+The returned `MediaDeliveryResult` carries success, media type, path, requested
+route, a privacy-safe display route, and a redacted host result.
+
+For non-media host calls, `invoke_host_tool` remains the lower-level seam.
 `invoke_host_tool` resolves the supported direct host handler and wraps the nested
 operation with Hermes `pre_tool_call` and `post_tool_call` hooks. A blocking hook
 prevents the handler from running. If the guard API is unavailable, invocation is
 refused rather than sending without policy checks. `send_message` is the currently
 supported host tool; unknown names fail explicitly.
 
-The upstream Hermes contract suite runs this exact generated-image payload through
-the real `send_message` target parser, media extractor, and Telegram formatter. It
-mocks only the final Bot API client and asserts that Hermes calls `send_photo` with
-the numeric chat ID and generated file, without emitting a separate text message.
+The upstream Hermes contract suite runs image and typed voice payloads through
+the real `send_message` target parser, media extractor, and Telegram formatter.
+It mocks only the final Bot API client and asserts that Hermes calls `send_photo`
+and `send_voice` with the expected files, without separate text messages.
 
 ## Logging contract
 

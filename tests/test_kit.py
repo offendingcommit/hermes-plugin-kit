@@ -319,6 +319,137 @@ class HostToolInvocationTests(unittest.TestCase):
             hpk.invoke_host_tool("not_a_host_tool", {})
 
 
+class MediaDeliveryContractTests(unittest.TestCase):
+    def test_voice_payload_has_typed_hermes_directive(self) -> None:
+        payload = hpk.MediaPayload("/opt/data/voice-staging/memo.ogg", hpk.MediaType.VOICE)
+        self.assertEqual(
+            payload.to_message(),
+            "[[audio_as_voice]]\nMEDIA:/opt/data/voice-staging/memo.ogg",
+        )
+
+    def test_voice_payload_rejects_non_voice_container(self) -> None:
+        with self.assertRaisesRegex(ValueError, "ogg or opus"):
+            hpk.MediaPayload("/opt/data/voice-staging/memo.mp3", hpk.MediaType.VOICE)
+
+    def test_origin_target_uses_task_local_gateway_route(self) -> None:
+        session_context = types.ModuleType("gateway.session_context")
+        values = {
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "-5372910000",
+            "HERMES_SESSION_THREAD_ID": "42",
+        }
+        session_context.get_session_env = lambda name, default="": values.get(name, default)
+        gateway = types.ModuleType("gateway")
+        gateway.__path__ = []
+        gateway.session_context = session_context
+
+        with patch.dict(
+            sys.modules,
+            {"gateway": gateway, "gateway.session_context": session_context},
+        ):
+            target = hpk.resolve_delivery_target("origin")
+
+        self.assertEqual(target.requested, "origin")
+        self.assertEqual(target.host_target, "telegram:-5372910000:42")
+        self.assertEqual(target.display, "telegram:-…0000:42")
+
+    def test_origin_target_preserves_telegram_dm_route(self) -> None:
+        session_context = types.ModuleType("gateway.session_context")
+        values = {
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "8670382527",
+            "HERMES_SESSION_THREAD_ID": "",
+        }
+        session_context.get_session_env = lambda name, default="": values.get(name, default)
+        gateway = types.ModuleType("gateway")
+        gateway.__path__ = []
+        gateway.session_context = session_context
+
+        with patch.dict(
+            sys.modules,
+            {"gateway": gateway, "gateway.session_context": session_context},
+        ):
+            target = hpk.resolve_delivery_target("origin")
+
+        self.assertEqual(target.host_target, "telegram:8670382527")
+        self.assertEqual(target.display, "telegram:…2527")
+
+    def test_origin_target_preserves_telegram_group_route(self) -> None:
+        session_context = types.ModuleType("gateway.session_context")
+        values = {
+            "HERMES_SESSION_PLATFORM": "telegram",
+            "HERMES_SESSION_CHAT_ID": "-5372910000",
+            "HERMES_SESSION_THREAD_ID": "",
+        }
+        session_context.get_session_env = lambda name, default="": values.get(name, default)
+        gateway = types.ModuleType("gateway")
+        gateway.__path__ = []
+        gateway.session_context = session_context
+
+        with patch.dict(
+            sys.modules,
+            {"gateway": gateway, "gateway.session_context": session_context},
+        ):
+            target = hpk.resolve_delivery_target("origin")
+
+        self.assertEqual(target.host_target, "telegram:-5372910000")
+        self.assertEqual(target.display, "telegram:-…0000")
+
+    def test_deliver_media_invokes_typed_host_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            payload = hpk.MediaPayload(path, hpk.MediaType.VOICE)
+            with patch.object(
+                hpk,
+                "invoke_host_tool",
+                return_value=json.dumps(
+                    {"success": True, "platform": "telegram", "chat_id": "8670382527", "message_id": "9"}
+                ),
+            ) as invoke:
+                result = hpk.deliver_media(
+                    payload,
+                    target="telegram:8670382527",
+                    session_id="session-1",
+                )
+
+        invoke.assert_called_once_with(
+            "send_message",
+            {
+                "action": "send",
+                "target": "telegram:8670382527",
+                "message": f"[[audio_as_voice]]\nMEDIA:{path}",
+            },
+            session_id="session-1",
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.requested_target, "telegram:…2527")
+        self.assertEqual(result.display_target, "telegram:…2527")
+        self.assertEqual(result.host_result["chat_id"], "…2527")
+        self.assertEqual(result.as_dict()["media_type"], "voice")
+
+    def test_delivery_result_redacts_raw_route_from_host_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(
+                hpk,
+                "invoke_host_tool",
+                return_value=json.dumps(
+                    {"error": "send to telegram:-5372910000 failed for -5372910000"}
+                ),
+            ):
+                result = hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram:-5372910000",
+                )
+
+        self.assertFalse(result.success)
+        encoded = json.dumps(result.as_dict(), ensure_ascii=False)
+        self.assertNotIn("5372910000", encoded.replace("…0000", ""))
+        self.assertIn("telegram:-…0000", encoded)
+
+
 class RegisterPluginTests(unittest.TestCase):
     def _module(self, **attrs):
         module = types.ModuleType("sample_plugin")
