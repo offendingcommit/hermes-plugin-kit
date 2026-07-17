@@ -231,6 +231,8 @@ class HermesContractTests(unittest.TestCase):
         )
 
         bot = types.SimpleNamespace(
+            initialize=AsyncMock(),
+            shutdown=AsyncMock(),
             send_message=AsyncMock(),
             send_photo=AsyncMock(
                 return_value=types.SimpleNamespace(message_id=42)
@@ -259,6 +261,10 @@ class HermesContractTests(unittest.TestCase):
             @staticmethod
             def format_message(message: str) -> str:
                 return message
+
+            @staticmethod
+            def _message_thread_id_for_send(value: str) -> int | None:
+                return None if value == "1" else int(value)
 
         telegram_adapter = types.ModuleType("plugins.platforms.telegram.adapter")
         telegram_adapter.TelegramAdapter = TelegramAdapter
@@ -320,6 +326,10 @@ class HermesContractTests(unittest.TestCase):
                     hpk.MediaPayload(voice_path, hpk.MediaType.VOICE),
                     target="telegram:8670382527",
                 )
+                spoiler_result = hpk.deliver_media(
+                    hpk.MediaPayload(image_path, spoiler=True),
+                    target="telegram:-5372910000:42",
+                )
 
             self.assertTrue(result.get("success"), result)
             self.assertEqual(result["platform"], "telegram")
@@ -328,14 +338,16 @@ class HermesContractTests(unittest.TestCase):
             self.assertTrue(voice_result.success, voice_result)
             self.assertEqual(voice_result.media_type, hpk.MediaType.VOICE)
             self.assertEqual(voice_result.host_result["message_id"], "43")
-            self.assertEqual(bot_factory.call_count, 2)
+            self.assertTrue(spoiler_result.success, spoiler_result)
+            self.assertTrue(spoiler_result.spoiler)
+            self.assertEqual(bot_factory.call_count, 3)
             self.assertTrue(
                 all(item.kwargs == {"token": "contract-token"} for item in bot_factory.call_args_list)
             )
             bot.send_message.assert_not_awaited()
-            bot.send_photo.assert_awaited_once()
+            self.assertEqual(bot.send_photo.await_count, 2)
             bot.send_voice.assert_awaited_once()
-            photo_call = bot.send_photo.await_args
+            photo_call = bot.send_photo.await_args_list[0]
             self.assertEqual(photo_call.kwargs["chat_id"], 8670382527)
             self.assertEqual(
                 photo_call.kwargs["photo"].name,
@@ -347,6 +359,12 @@ class HermesContractTests(unittest.TestCase):
                 voice_call.kwargs["voice"].name,
                 str(voice_path.resolve()),
             )
+            spoiler_call = bot.send_photo.await_args_list[1]
+            self.assertEqual(spoiler_call.kwargs["chat_id"], -5372910000)
+            self.assertEqual(spoiler_call.kwargs["message_thread_id"], 42)
+            self.assertTrue(spoiler_call.kwargs["has_spoiler"])
+            bot.initialize.assert_awaited_once()
+            bot.shutdown.assert_awaited_once()
 
 
 if __name__ == "__main__":

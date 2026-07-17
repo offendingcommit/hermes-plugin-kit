@@ -106,6 +106,7 @@ _HOOK_CONTEXT_KEYS = (
 _MEDIA_DELIVERY_STATE_TTL_SECONDS = 300.0
 _MEDIA_DELIVERY_STATE: dict[str, float] = {}
 _MEDIA_DELIVERY_STATE_LOCK = threading.Lock()
+_TELEGRAM_SPOILER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,7 @@ class MediaPayload:
     path: Path | str
     media_type: MediaType | str = MediaType.AUTO
     caption: str = ""
+    spoiler: bool = False
 
     def __post_init__(self) -> None:
         path = Path(self.path).expanduser()
@@ -158,6 +160,15 @@ class MediaPayload:
             raise ValueError("media_type must be auto, voice, or document") from exc
         if media_type is MediaType.VOICE and path.suffix.lower() not in {".ogg", ".opus"}:
             raise ValueError("voice media must use an ogg or opus container")
+        if not isinstance(self.spoiler, bool):
+            raise ValueError("spoiler must be a boolean")
+        if self.spoiler and (
+            media_type is not MediaType.AUTO
+            or path.suffix.lower() not in _TELEGRAM_SPOILER_IMAGE_EXTENSIONS
+        ):
+            raise ValueError(
+                "spoiler media must be an image using jpg, jpeg, png, or webp"
+            )
         object.__setattr__(self, "path", path)
         object.__setattr__(self, "media_type", media_type)
         object.__setattr__(self, "caption", str(self.caption or "").strip())
@@ -191,6 +202,7 @@ class MediaDeliveryResult:
     media_type: MediaType
     path: Path
     host_result: dict[str, Any]
+    spoiler: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -200,6 +212,7 @@ class MediaDeliveryResult:
             "media_type": self.media_type.value,
             "path": str(self.path),
             "host_result": self.host_result,
+            "spoiler": self.spoiler,
         }
 
 
@@ -518,20 +531,15 @@ def _emit_host_post_tool_call(
         )
 
 
-def invoke_host_tool(name: str, args: dict | None = None, **context: Any) -> str:
-    """Invoke a Hermes host capability that is not registry-backed.
-
-    Some Hermes capabilities, notably ``send_message``, are runtime services
-    rather than entries in ``tools.registry``. Plugin handlers must use this
-    seam instead of ``registry.dispatch`` so the direct host handler is found
-    while ``pre_tool_call`` and ``post_tool_call`` hooks still observe the
-    nested operation.
-    """
-    handler = _load_host_tool(name)
-    tool_args = {} if args is None else args
-    if not isinstance(tool_args, dict):
-        raise TypeError("host tool args must be a dict")
-
+def _invoke_guarded_host_operation(
+    name: str,
+    tool_args: dict[str, Any],
+    operation: Callable[[], Any],
+    *,
+    context: dict[str, Any],
+    failure_message: str,
+) -> str:
+    """Run a host operation behind the real Hermes pre/post-tool hooks."""
     try:
         from hermes_cli.plugins import resolve_pre_tool_block
     except (ImportError, AttributeError) as exc:
@@ -557,17 +565,14 @@ def invoke_host_tool(name: str, args: dict | None = None, **context: Any) -> str
 
     started = time.perf_counter()
     try:
-        result = handler(tool_args, **context)
+        result = operation()
     except Exception as exc:
         logging.getLogger("hermes_plugin_kit").exception(
-            "%s: host handler raised; error_type=%s",
+            "%s: host operation raised; error_type=%s",
             name,
             type(exc).__name__,
         )
-        result = json.dumps(
-            {"error": f"{name} host handler failed: {type(exc).__name__}"},
-            ensure_ascii=False,
-        )
+        result = {"error": f"{failure_message}: {type(exc).__name__}"}
     if not isinstance(result, str):
         result = json.dumps(result, ensure_ascii=False)
 
@@ -584,6 +589,29 @@ def invoke_host_tool(name: str, args: dict | None = None, **context: Any) -> str
         context=context,
     )
     return result
+
+
+def invoke_host_tool(name: str, args: dict | None = None, **context: Any) -> str:
+    """Invoke a Hermes host capability that is not registry-backed.
+
+    Some Hermes capabilities, notably ``send_message``, are runtime services
+    rather than entries in ``tools.registry``. Plugin handlers must use this
+    seam instead of ``registry.dispatch`` so the direct host handler is found
+    while ``pre_tool_call`` and ``post_tool_call`` hooks still observe the
+    nested operation.
+    """
+    handler = _load_host_tool(name)
+    tool_args = {} if args is None else args
+    if not isinstance(tool_args, dict):
+        raise TypeError("host tool args must be a dict")
+
+    return _invoke_guarded_host_operation(
+        name,
+        tool_args,
+        lambda: handler(tool_args, **context),
+        context=context,
+        failure_message=f"{name} host handler failed",
+    )
 
 
 def _display_delivery_identifier(value: str) -> str:
@@ -751,6 +779,145 @@ def clear_media_delivery_state(
             _MEDIA_DELIVERY_STATE.pop(context_id, None)
 
 
+def _invoke_guarded_spoiler_delivery(
+    media: MediaPayload,
+    resolved: ResolvedDeliveryTarget,
+    context: dict[str, Any],
+) -> str:
+    """Run the kit-owned Telegram extension through Hermes lifecycle guards."""
+    tool_args = {
+        "action": "send",
+        "target": resolved.host_target,
+        "message": media.to_message(),
+        "media_options": {"spoiler": True},
+    }
+    return _invoke_guarded_host_operation(
+        "send_message",
+        tool_args,
+        lambda: _deliver_telegram_spoiler(media, resolved),
+        context=context,
+        failure_message="Telegram spoiler delivery failed",
+    )
+
+
+def _telegram_spoiler_route(
+    resolved: ResolvedDeliveryTarget,
+    config: Any,
+    platform: Any,
+) -> tuple[str, str | None]:
+    parts = resolved.host_target.split(":", 2)
+    if not parts or parts[0].lower() != "telegram":
+        raise ValueError("spoiler media delivery requires a Telegram target")
+    if len(parts) == 1 or not parts[1]:
+        home = config.get_home_channel(platform)
+        if home is None or not str(home.chat_id or "").strip():
+            raise RuntimeError("Telegram has no configured home channel")
+        return str(home.chat_id), str(home.thread_id) if home.thread_id else None
+    chat_id = parts[1]
+    thread_id = parts[2] if len(parts) == 3 and parts[2] else None
+    return chat_id, thread_id
+
+
+def _deliver_telegram_spoiler(
+    media: MediaPayload,
+    resolved: ResolvedDeliveryTarget,
+) -> dict[str, Any]:
+    """Send one spoiler photo through Telegram without patching Hermes core."""
+    from gateway.config import Platform, load_gateway_config
+
+    config = load_gateway_config()
+    telegram_platform = Platform.TELEGRAM
+    platform_config = config.platforms.get(telegram_platform)
+    if not platform_config or not platform_config.enabled or not platform_config.token:
+        raise RuntimeError("Telegram is not configured")
+    chat_id, thread_id = _telegram_spoiler_route(
+        resolved,
+        config,
+        telegram_platform,
+    )
+
+    try:
+        from gateway.platforms.base import utf16_len
+
+        caption_length = utf16_len(media.caption)
+    except Exception:
+        caption_length = len(media.caption)
+    if caption_length > 1024:
+        raise ValueError("Telegram spoiler image caption exceeds 1024 characters")
+
+    from model_tools import _run_async
+
+    async def send() -> dict[str, Any]:
+        from telegram import Bot
+        from plugins.platforms.telegram.adapter import TelegramAdapter
+        from plugins.platforms.telegram.telegram_ids import (
+            normalize_telegram_chat_id,
+        )
+
+        bot_kwargs: dict[str, Any] = {"token": platform_config.token}
+        extra = getattr(platform_config, "extra", {}) or {}
+        if extra.get("base_url"):
+            bot_kwargs["base_url"] = extra["base_url"]
+            bot_kwargs["base_file_url"] = extra.get(
+                "base_file_url",
+                extra["base_url"],
+            )
+        if extra.get("local_mode"):
+            bot_kwargs["local_mode"] = True
+
+        try:
+            from gateway.platforms.base import resolve_proxy_url
+
+            proxy_url = resolve_proxy_url(
+                "TELEGRAM_PROXY",
+                target_hosts=["api.telegram.org"],
+            )
+        except Exception:
+            proxy_url = None
+        if proxy_url:
+            from telegram.request import HTTPXRequest
+
+            bot_kwargs["request"] = HTTPXRequest(proxy=proxy_url)
+
+        bot = Bot(**bot_kwargs)
+        initialized = False
+        try:
+            await bot.initialize()
+            initialized = True
+            send_kwargs: dict[str, Any] = {
+                "chat_id": normalize_telegram_chat_id(chat_id),
+                "photo": None,
+                "caption": media.caption or None,
+                "has_spoiler": True,
+            }
+            if thread_id is not None:
+                effective_thread_id = TelegramAdapter._message_thread_id_for_send(
+                    str(thread_id)
+                )
+                if effective_thread_id is not None:
+                    send_kwargs["message_thread_id"] = effective_thread_id
+            with media.path.open("rb") as image_file:
+                send_kwargs["photo"] = image_file
+                message = await bot.send_photo(**send_kwargs)
+            return {
+                "success": True,
+                "platform": "telegram",
+                "chat_id": chat_id,
+                "message_id": str(message.message_id),
+                "spoiler": True,
+            }
+        finally:
+            if initialized:
+                await bot.shutdown()
+            else:
+                try:
+                    await bot.shutdown()
+                except Exception:
+                    pass
+
+    return _run_async(send())
+
+
 def deliver_media(
     media: MediaPayload,
     *,
@@ -774,15 +941,20 @@ def deliver_media(
         media.media_type.value,
         media.path,
     )
-    raw = invoke_host_tool(
-        "send_message",
-        {
-            "action": "send",
-            "target": resolved.host_target,
-            "message": media.to_message(),
-        },
-        **context,
-    )
+    if media.spoiler:
+        if resolved.host_target.split(":", 1)[0].lower() != "telegram":
+            raise ValueError("spoiler media delivery requires a Telegram target")
+        raw = _invoke_guarded_spoiler_delivery(media, resolved, context)
+    else:
+        raw = invoke_host_tool(
+            "send_message",
+            {
+                "action": "send",
+                "target": resolved.host_target,
+                "message": media.to_message(),
+            },
+            **context,
+        )
     try:
         host_payload = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
@@ -809,6 +981,7 @@ def deliver_media(
         media_type=media.media_type,
         path=media.path,
         host_result=safe_result,
+        spoiler=media.spoiler,
     )
 
 

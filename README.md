@@ -225,7 +225,28 @@ def deliver_voice_memo(path: str, **runtime_context):
 through Hermes' task-local platform/chat/thread context inside the kit, so a
 plugin never imports gateway internals or exposes raw group IDs to the model.
 The returned `MediaDeliveryResult` carries success, media type, path, requested
-route, a privacy-safe display route, and a redacted host result.
+route, a privacy-safe display route, spoiler state, and a redacted host result.
+
+Telegram spoiler photos are available without patching Hermes core:
+
+```python
+deliver_media(
+    MediaPayload("/opt/data/avatars/generated/reveal.png", spoiler=True),
+    target="origin",
+    **runtime_context,
+)
+```
+
+The ordinary path remains Hermes' host-managed `send_message`. Because that
+host contract does not currently expose Telegram's `has_spoiler`, only
+`spoiler=True` uses the kit's narrow Telegram extension. The extension accepts
+JPG, JPEG, PNG, and WebP photos, resolves the same Hermes current-chat/home
+routes (including group topics), runs the normal Hermes `pre_tool_call` and
+`post_tool_call` hooks, forwards `has_spoiler=True`, closes its one-shot Bot
+client, and returns the same privacy-safe typed result. Voice, document,
+non-Telegram, and unsupported-image requests are rejected rather than silently
+losing spoiler intent. The Telegram token remains runtime-owned and is never a
+model argument or result field.
 
 Direct delivery and final response delivery are separate stages in Hermes. A
 consumer that calls `deliver_media` must register the kit's matching Hermes
@@ -259,7 +280,9 @@ supported host tool; unknown names fail explicitly.
 The upstream Hermes contract suite runs image and typed voice payloads through
 the real `send_message` target parser, media extractor, and Telegram formatter.
 It mocks only the final Bot API client and asserts that Hermes calls `send_photo`
-and `send_voice` with the expected files, without separate text messages.
+and `send_voice` with the expected files, without separate text messages. It
+also runs the kit-owned spoiler extension against Hermes' real config, session,
+async bridge, and Telegram library shapes while mocking only Bot network calls.
 
 ## Logging contract
 
