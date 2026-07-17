@@ -54,6 +54,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
@@ -63,6 +64,12 @@ __all__ = [
     "plugin_skill",
     "register_plugin",
     "invoke_host_tool",
+    "deliver_media",
+    "resolve_delivery_target",
+    "MediaType",
+    "MediaPayload",
+    "ResolvedDeliveryTarget",
+    "MediaDeliveryResult",
     "PluginSkill",
     "RegistrationSummary",
     "register_all",
@@ -113,6 +120,81 @@ class RegistrationSummary:
     hooks: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
     skipped_optional_skills: tuple[str, ...] = ()
+
+
+class MediaType(str, Enum):
+    """Hermes-agent ``send_message`` media directive modes."""
+
+    AUTO = "auto"
+    VOICE = "voice"
+    DOCUMENT = "document"
+
+
+@dataclass(frozen=True)
+class MediaPayload:
+    """A local attachment encoded in Hermes-agent's native message shape."""
+
+    path: Path | str
+    media_type: MediaType | str = MediaType.AUTO
+    caption: str = ""
+
+    def __post_init__(self) -> None:
+        path = Path(self.path).expanduser()
+        if not path.is_absolute():
+            raise ValueError("media path must be absolute")
+        try:
+            media_type = (
+                self.media_type
+                if isinstance(self.media_type, MediaType)
+                else MediaType(self.media_type)
+            )
+        except ValueError as exc:
+            raise ValueError("media_type must be auto, voice, or document") from exc
+        if media_type is MediaType.VOICE and path.suffix.lower() not in {".ogg", ".opus"}:
+            raise ValueError("voice media must use an ogg or opus container")
+        object.__setattr__(self, "path", path)
+        object.__setattr__(self, "media_type", media_type)
+        object.__setattr__(self, "caption", str(self.caption or "").strip())
+
+    def to_message(self) -> str:
+        directive = ""
+        if self.media_type is MediaType.VOICE:
+            directive = "[[audio_as_voice]]\n"
+        elif self.media_type is MediaType.DOCUMENT:
+            directive = "[[as_document]]\n"
+        caption = f"{self.caption}\n" if self.caption else ""
+        return f"{caption}{directive}MEDIA:{self.path}"
+
+
+@dataclass(frozen=True)
+class ResolvedDeliveryTarget:
+    """Requested route plus the host-only route and privacy-safe display form."""
+
+    requested: str
+    host_target: str
+    display: str
+
+
+@dataclass(frozen=True)
+class MediaDeliveryResult:
+    """Typed result from Hermes host media delivery."""
+
+    success: bool
+    requested_target: str
+    display_target: str
+    media_type: MediaType
+    path: Path
+    host_result: dict[str, Any]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "success": self.success,
+            "requested_target": self.requested_target,
+            "display_target": self.display_target,
+            "media_type": self.media_type.value,
+            "path": str(self.path),
+            "host_result": self.host_result,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +578,145 @@ def invoke_host_tool(name: str, args: dict | None = None, **context: Any) -> str
         context=context,
     )
     return result
+
+
+def _display_delivery_identifier(value: str) -> str:
+    raw = str(value or "")
+    sign = "-" if raw.startswith("-") else ""
+    digits = raw.lstrip("-")
+    if digits.isdigit() and len(digits) > 4:
+        return f"{sign}…{digits[-4:]}"
+    return raw
+
+
+def _display_delivery_target(target: str) -> str:
+    parts = str(target or "").split(":")
+    if len(parts) >= 2:
+        parts[1] = _display_delivery_identifier(parts[1])
+    return ":".join(parts)
+
+
+def resolve_delivery_target(target: str) -> ResolvedDeliveryTarget:
+    """Resolve ``origin`` through Hermes task-local context.
+
+    Consumers never need to import ``gateway.session_context``. Explicit host
+    targets pass through unchanged; ``origin`` binds to the current platform,
+    chat, and optional thread without exposing the raw route to the model.
+    """
+    requested = str(target or "").strip()
+    if not requested:
+        raise ValueError("delivery target is required")
+    if requested != "origin":
+        return ResolvedDeliveryTarget(
+            requested=requested,
+            host_target=requested,
+            display=_display_delivery_target(requested),
+        )
+    try:
+        from gateway.session_context import get_session_env
+
+        platform = get_session_env("HERMES_SESSION_PLATFORM", "").strip().lower()
+        chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "").strip()
+        thread_id = get_session_env("HERMES_SESSION_THREAD_ID", "").strip()
+    except Exception as exc:
+        raise RuntimeError(
+            f"current Hermes delivery origin is unavailable: {type(exc).__name__}"
+        ) from exc
+    if not platform or not chat_id:
+        raise RuntimeError("current Hermes delivery origin has no platform/chat route")
+    host_target = f"{platform}:{chat_id}"
+    if thread_id:
+        host_target = f"{host_target}:{thread_id}"
+    return ResolvedDeliveryTarget(
+        requested=requested,
+        host_target=host_target,
+        display=_display_delivery_target(host_target),
+    )
+
+
+def _safe_media_host_result(
+    payload: Any,
+    resolved: ResolvedDeliveryTarget,
+) -> dict[str, Any]:
+    parts = resolved.host_target.split(":")
+    raw_chat_id = parts[1] if len(parts) >= 2 else ""
+    display_chat_id = _display_delivery_identifier(raw_chat_id)
+
+    def redact(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [redact(item) for item in value]
+        if isinstance(value, tuple):
+            return [redact(item) for item in value]
+        if isinstance(value, str):
+            safe = value.replace(resolved.host_target, resolved.display)
+            if raw_chat_id and raw_chat_id != display_chat_id:
+                safe = safe.replace(raw_chat_id, display_chat_id)
+            return safe
+        return value
+
+    safe = redact(payload)
+    return safe if isinstance(safe, dict) else {"result": safe}
+
+
+def deliver_media(
+    media: MediaPayload,
+    *,
+    target: str | ResolvedDeliveryTarget = "origin",
+    **context: Any,
+) -> MediaDeliveryResult:
+    """Deliver typed local media through Hermes' guarded host messaging seam."""
+    if not isinstance(media, MediaPayload):
+        raise TypeError("media must be a MediaPayload")
+    if not media.path.is_file() or media.path.stat().st_size <= 0:
+        raise ValueError(f"media file is missing or empty: {media.path}")
+    resolved = (
+        target
+        if isinstance(target, ResolvedDeliveryTarget)
+        else resolve_delivery_target(target)
+    )
+    log = logging.getLogger("hermes_plugin_kit")
+    log.info(
+        "event=media_delivery_started target=%s media_type=%s path=%s",
+        resolved.display,
+        media.media_type.value,
+        media.path,
+    )
+    raw = invoke_host_tool(
+        "send_message",
+        {
+            "action": "send",
+            "target": resolved.host_target,
+            "message": media.to_message(),
+        },
+        **context,
+    )
+    try:
+        host_payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        host_payload = {"error": "send_message returned invalid JSON"}
+    success = _host_result_fields(raw)[0] == "success"
+    safe_result = _safe_media_host_result(host_payload, resolved)
+    log_method = log.info if success else log.warning
+    log_method(
+        "event=media_delivery_completed target=%s media_type=%s success=%s",
+        resolved.display,
+        media.media_type.value,
+        success,
+    )
+    return MediaDeliveryResult(
+        success=success,
+        requested_target=(
+            resolved.requested
+            if resolved.requested == "origin"
+            else _display_delivery_target(resolved.requested)
+        ),
+        display_target=resolved.display,
+        media_type=media.media_type,
+        path=media.path,
+        host_result=safe_result,
+    )
 
 
 def tool(
