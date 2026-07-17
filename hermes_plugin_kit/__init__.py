@@ -52,6 +52,7 @@ import json
 import logging
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -66,6 +67,8 @@ __all__ = [
     "invoke_host_tool",
     "deliver_media",
     "resolve_delivery_target",
+    "transform_media_delivery_output",
+    "clear_media_delivery_state",
     "MediaType",
     "MediaPayload",
     "ResolvedDeliveryTarget",
@@ -100,6 +103,9 @@ _HOOK_CONTEXT_KEYS = (
     "turn_id",
     "api_request_id",
 )
+_MEDIA_DELIVERY_STATE_TTL_SECONDS = 300.0
+_MEDIA_DELIVERY_STATE: dict[str, float] = {}
+_MEDIA_DELIVERY_STATE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -660,6 +666,91 @@ def _safe_media_host_result(
     return safe if isinstance(safe, dict) else {"result": safe}
 
 
+def _media_delivery_context_ids(context: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            str(context.get(key) or "").strip()
+            for key in ("session_id", "task_id")
+            if str(context.get(key) or "").strip()
+        )
+    )
+
+
+def _prune_media_delivery_state(now: float) -> None:
+    expired = [
+        key
+        for key, created_at in _MEDIA_DELIVERY_STATE.items()
+        if now - created_at > _MEDIA_DELIVERY_STATE_TTL_SECONDS
+    ]
+    for key in expired:
+        _MEDIA_DELIVERY_STATE.pop(key, None)
+
+
+def _mark_media_delivery_success(context: dict[str, Any]) -> None:
+    context_ids = _media_delivery_context_ids(context)
+    if not context_ids:
+        return
+    now = time.monotonic()
+    with _MEDIA_DELIVERY_STATE_LOCK:
+        _prune_media_delivery_state(now)
+        for context_id in context_ids:
+            _MEDIA_DELIVERY_STATE[context_id] = now
+    logging.getLogger("hermes_plugin_kit").info(
+        "event=media_final_response_suppression_armed"
+    )
+
+
+def transform_media_delivery_output(
+    response_text: str = "",
+    session_id: str = "",
+    **_: Any,
+) -> str | None:
+    """Hermes ``transform_llm_output`` hook for an already-delivered attachment.
+
+    A successful :func:`deliver_media` call arms one task-local suppression.
+    The finalizer then replaces any model-authored text or repeated ``MEDIA``
+    tag with Hermes' canonical ``NO_REPLY`` marker. State is consumed once, so
+    later turns in the same session are unaffected.
+    """
+    context_id = str(session_id or "").strip()
+    if not context_id:
+        return None
+    now = time.monotonic()
+    with _MEDIA_DELIVERY_STATE_LOCK:
+        _prune_media_delivery_state(now)
+        armed = _MEDIA_DELIVERY_STATE.pop(context_id, None) is not None
+    if not armed:
+        return None
+    logging.getLogger("hermes_plugin_kit").info(
+        "event=media_final_response_suppressed original_chars=%d",
+        len(str(response_text or "")),
+    )
+    return "NO_REPLY"
+
+
+def clear_media_delivery_state(
+    session_id: str = "",
+    task_id: str = "",
+    **_: Any,
+) -> None:
+    """Hermes ``on_session_end`` cleanup for an unconsumed suppression marker."""
+    context_ids = tuple(
+        dict.fromkeys(
+            value
+            for value in (
+                str(session_id or "").strip(),
+                str(task_id or "").strip(),
+            )
+            if value
+        )
+    )
+    if not context_ids:
+        return
+    with _MEDIA_DELIVERY_STATE_LOCK:
+        for context_id in context_ids:
+            _MEDIA_DELIVERY_STATE.pop(context_id, None)
+
+
 def deliver_media(
     media: MediaPayload,
     *,
@@ -705,6 +796,8 @@ def deliver_media(
         media.media_type.value,
         success,
     )
+    if success:
+        _mark_media_delivery_success(context)
     return MediaDeliveryResult(
         success=success,
         requested_target=(

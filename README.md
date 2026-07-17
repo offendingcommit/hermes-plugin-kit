@@ -227,6 +227,28 @@ plugin never imports gateway internals or exposes raw group IDs to the model.
 The returned `MediaDeliveryResult` carries success, media type, path, requested
 route, a privacy-safe display route, and a redacted host result.
 
+Direct delivery and final response delivery are separate stages in Hermes. A
+consumer that calls `deliver_media` must register the kit's matching Hermes
+lifecycle hooks so a successful direct send cannot be followed by model-authored
+text or a duplicate `MEDIA:` directive:
+
+```python
+from hermes_plugin_kit import (
+    clear_media_delivery_state,
+    transform_media_delivery_output,
+)
+
+def register(ctx):
+    ctx.register_hook("transform_llm_output", transform_media_delivery_output)
+    ctx.register_hook("on_session_end", clear_media_delivery_state)
+```
+
+Successful delivery arms a one-turn marker for the current Hermes session.
+`transform_media_delivery_output` consumes it and returns Hermes' canonical
+`NO_REPLY` response before the gateway sees the final text. Failed delivery does
+not arm suppression, and `on_session_end` clears any unconsumed marker. These are
+Hermes-agent lifecycle and response contracts; they are not OpenClaw shapes.
+
 For non-media host calls, `invoke_host_tool` remains the lower-level seam.
 `invoke_host_tool` resolves the supported direct host handler and wraps the nested
 operation with Hermes `pre_tool_call` and `post_tool_call` hooks. A blocking hook

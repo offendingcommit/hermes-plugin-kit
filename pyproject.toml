@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-plugin-kit"
-version = "0.2.0"
+version = "0.2.1"
 description = "Convention-correct lifecycle registration for hermes-agent plugins."
 readme = "README.md"
 requires-python = ">=3.11"

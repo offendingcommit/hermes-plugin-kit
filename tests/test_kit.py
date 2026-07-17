@@ -320,6 +320,10 @@ class HostToolInvocationTests(unittest.TestCase):
 
 
 class MediaDeliveryContractTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        hpk.clear_media_delivery_state(session_id="session-1")
+        hpk.clear_media_delivery_state(session_id="session-2")
+
     def test_voice_payload_has_typed_hermes_directive(self) -> None:
         payload = hpk.MediaPayload("/opt/data/voice-staging/memo.ogg", hpk.MediaType.VOICE)
         self.assertEqual(
@@ -427,6 +431,107 @@ class MediaDeliveryContractTests(unittest.TestCase):
         self.assertEqual(result.display_target, "telegram:…2527")
         self.assertEqual(result.host_result["chat_id"], "…2527")
         self.assertEqual(result.as_dict()["media_type"], "voice")
+
+    def test_successful_delivery_suppresses_the_same_turn_final_response_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(
+                hpk,
+                "invoke_host_tool",
+                return_value=json.dumps({"success": True, "message_id": "9"}),
+            ):
+                hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram:8670382527",
+                    session_id="session-1",
+                )
+
+        self.assertEqual(
+            hpk.transform_media_delivery_output(
+                response_text=f"[[audio_as_voice]]\nMEDIA:{path}",
+                session_id="session-1",
+                platform="telegram",
+            ),
+            "NO_REPLY",
+        )
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(
+                response_text="unrelated next turn",
+                session_id="session-1",
+                platform="telegram",
+            )
+        )
+
+    def test_successful_delivery_does_not_suppress_another_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(
+                hpk,
+                "invoke_host_tool",
+                return_value=json.dumps({"success": True}),
+            ):
+                hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram:-5372910000",
+                    session_id="session-1",
+                )
+
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(
+                response_text="keep this",
+                session_id="session-2",
+                platform="telegram",
+            )
+        )
+
+    def test_failed_delivery_does_not_suppress_final_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(
+                hpk,
+                "invoke_host_tool",
+                return_value=json.dumps({"success": False, "error": "offline"}),
+            ):
+                hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram:8670382527",
+                    session_id="session-1",
+                )
+
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(
+                response_text="delivery failed",
+                session_id="session-1",
+                platform="telegram",
+            )
+        )
+
+    def test_session_end_clears_unconsumed_delivery_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(
+                hpk,
+                "invoke_host_tool",
+                return_value=json.dumps({"success": True}),
+            ):
+                hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram:8670382527",
+                    session_id="session-1",
+                )
+
+        hpk.clear_media_delivery_state(session_id="session-1")
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(
+                response_text="next turn",
+                session_id="session-1",
+                platform="telegram",
+            )
+        )
 
     def test_delivery_result_redacts_raw_route_from_host_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
