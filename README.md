@@ -548,6 +548,18 @@ and `send_voice` with the expected files, without separate text messages. It
 also runs the kit-owned spoiler extension against Hermes' real config, session,
 async bridge, and Telegram library shapes while mocking only Bot network calls.
 
+## Agent skill
+
+The repo owns a Hermes plugin authoring skill at
+[`skills/hermes-plugins`](skills/hermes-plugins). It includes a kit API map,
+surface checklist, and routed references to the official Hermes Agent docs.
+
+To use this checkout as the canonical Codex skill:
+
+```bash
+ln -s "$(pwd)/skills/hermes-plugins" ~/.codex/skills/hermes-plugins
+```
+
 ## Logging contract
 
 The kit logs under the decorated handler's module logger, so each plugin can

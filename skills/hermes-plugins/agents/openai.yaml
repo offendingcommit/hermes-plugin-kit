@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hermes Plugins"
+  short_description: "Build and verify Hermes Agent plugins"
+  default_prompt: "Use $hermes-plugins to build or audit a Hermes Agent plugin against hermes-plugin-kit and the official upstream contracts."
