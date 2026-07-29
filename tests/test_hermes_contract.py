@@ -51,6 +51,13 @@ def _import_real_hermes():
             VALID_HOOKS,
             resolve_plugin_command_result,
         )
+        from hermes_cli.middleware import (  # type: ignore
+            VALID_MIDDLEWARE,
+            apply_llm_request_middleware,
+            apply_tool_request_middleware,
+            run_llm_execution_middleware,
+            run_tool_execution_middleware,
+        )
         from tools.registry import registry  # type: ignore
 
         # A stale checkout that predates plugin-owned skills is not the
@@ -59,13 +66,22 @@ def _import_real_hermes():
             raise ImportError("hermes-agent PluginContext.register_skill is unavailable")
         if not hasattr(PluginManager, "find_plugin_skill"):
             raise ImportError("hermes-agent PluginManager.find_plugin_skill is unavailable")
+        if not hasattr(PluginContext, "register_middleware"):
+            raise ImportError(
+                "hermes-agent PluginContext.register_middleware is unavailable"
+            )
 
         return types.SimpleNamespace(
+            apply_llm_request_middleware=apply_llm_request_middleware,
+            apply_tool_request_middleware=apply_tool_request_middleware,
             PluginContext=PluginContext,
             PluginManager=PluginManager,
             PluginManifest=PluginManifest,
             VALID_HOOKS=set(VALID_HOOKS),
+            VALID_MIDDLEWARE=set(VALID_MIDDLEWARE),
             resolve_plugin_command_result=resolve_plugin_command_result,
+            run_llm_execution_middleware=run_llm_execution_middleware,
+            run_tool_execution_middleware=run_tool_execution_middleware,
             registry=registry,
         )
 
@@ -229,6 +245,123 @@ class HermesContractTests(unittest.TestCase):
             "command:exact raw args",
         )
 
+    def test_middleware_registers_and_runs_all_real_hermes_contracts(self) -> None:
+        request_calls: list[tuple[str, dict]] = []
+        execution_calls: list[tuple[str, dict]] = []
+
+        @hpk.middleware(hpk.MiddlewareKind.TOOL_REQUEST)
+        def rewrite_tool_request(**kwargs):
+            request_calls.append(("tool_request", kwargs))
+            return {
+                "args": {**kwargs["args"], "rewritten": True},
+                "source": "contract-test",
+            }
+
+        @hpk.middleware(hpk.MiddlewareKind.LLM_REQUEST)
+        def rewrite_llm_request(**kwargs):
+            request_calls.append(("llm_request", kwargs))
+            return {
+                "request": {**kwargs["request"], "rewritten": True},
+                "source": "contract-test",
+            }
+
+        @hpk.middleware(hpk.MiddlewareKind.TOOL_EXECUTION)
+        def wrap_tool_execution(**kwargs):
+            execution_calls.append(("tool_execution", kwargs))
+            result = kwargs["next_call"]({**kwargs["args"], "wrapped": True})
+            return {"middleware": "tool", "result": result}
+
+        @hpk.middleware(hpk.MiddlewareKind.LLM_EXECUTION)
+        def wrap_llm_execution(**kwargs):
+            execution_calls.append(("llm_execution", kwargs))
+            result = kwargs["next_call"](
+                {**kwargs["request"], "wrapped": True}
+            )
+            return {"middleware": "llm", "result": result}
+
+        module = types.ModuleType("contract_middleware_plugin")
+        module.rewrite_tool_request = rewrite_tool_request
+        module.rewrite_llm_request = rewrite_llm_request
+        module.wrap_tool_execution = wrap_tool_execution
+        module.wrap_llm_execution = wrap_llm_execution
+
+        manager = _REAL.PluginManager()
+        manifest = _REAL.PluginManifest(name="contract-plugin")
+        ctx = _REAL.PluginContext(manifest, manager)
+        summary = hpk.register_plugin(ctx, module)
+
+        expected_kinds = tuple(sorted(kind.value for kind in hpk.MiddlewareKind))
+        self.assertEqual(summary.middlewares, expected_kinds)
+        self.assertEqual(set(manager._middleware), set(_REAL.VALID_MIDDLEWARE))
+
+        with patch("hermes_cli.plugins.get_plugin_manager", return_value=manager):
+            tool_request = _REAL.apply_tool_request_middleware(
+                "contract_tool",
+                {"value": "original"},
+                session_id="session-1",
+            )
+            llm_request = _REAL.apply_llm_request_middleware(
+                {"model": "contract-model"},
+                session_id="session-1",
+            )
+            tool_execution = _REAL.run_tool_execution_middleware(
+                "contract_tool",
+                {"value": "effective"},
+                lambda args: {"terminal": args},
+                session_id="session-1",
+            )
+            llm_execution = _REAL.run_llm_execution_middleware(
+                {"model": "contract-model"},
+                lambda request: {"terminal": request},
+                session_id="session-1",
+            )
+
+        self.assertTrue(tool_request.changed)
+        self.assertEqual(
+            tool_request.payload,
+            {"value": "original", "rewritten": True},
+        )
+        self.assertEqual(tool_request.trace, [{"source": "contract-test"}])
+        self.assertTrue(llm_request.changed)
+        self.assertEqual(
+            llm_request.payload,
+            {"model": "contract-model", "rewritten": True},
+        )
+        self.assertEqual(
+            tool_execution,
+            {
+                "middleware": "tool",
+                "result": {
+                    "terminal": {"value": "effective", "wrapped": True}
+                },
+            },
+        )
+        self.assertEqual(
+            llm_execution,
+            {
+                "middleware": "llm",
+                "result": {
+                    "terminal": {
+                        "model": "contract-model",
+                        "wrapped": True,
+                    }
+                },
+            },
+        )
+        self.assertEqual(
+            [name for name, _kwargs in request_calls],
+            ["tool_request", "llm_request"],
+        )
+        self.assertEqual(
+            [name for name, _kwargs in execution_calls],
+            ["tool_execution", "llm_execution"],
+        )
+        for _name, kwargs in request_calls + execution_calls:
+            self.assertEqual(
+                kwargs["middleware_schema_version"],
+                "hermes.middleware.v1",
+            )
+
     def test_lifecycle_calls_bind_to_real_plugincontext_signatures(self) -> None:
         command_sig = inspect.signature(_REAL.PluginContext.register_command)
         command_sig.bind(
@@ -241,6 +374,9 @@ class HermesContractTests(unittest.TestCase):
 
         hook_sig = inspect.signature(_REAL.PluginContext.register_hook)
         hook_sig.bind(None, "pre_llm_call", lambda **kwargs: None)
+
+        middleware_sig = inspect.signature(_REAL.PluginContext.register_middleware)
+        middleware_sig.bind(None, "tool_request", lambda **kwargs: None)
 
         skill_sig = inspect.signature(_REAL.PluginContext.register_skill)
         skill_sig.bind(

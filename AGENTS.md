@@ -1,14 +1,15 @@
 # hermes-plugin-kit
 
-Convention-correct helper library for registering `hermes-agent` plugin tools,
-hooks, and skills.
+Convention-correct helper library for registering `hermes-agent` plugin
+commands, tools, middleware, hooks, and skills.
 This repository is an installable Python package, not a path-loaded runtime
 plugin.
 
 ## Working Rules
 
-- Keep `@tool` and `register_all` backward compatible. Use `@hook`,
-  `plugin_skill`, and `register_plugin` for full plugin lifecycle registration.
+- Keep `@tool` and `register_all` backward compatible. Use `@command`,
+  `@middleware`, `@hook`, `plugin_skill`, and `register_plugin` for full plugin
+  lifecycle registration.
 - Use `invoke_host_tool` for host-managed capabilities such as `send_message`;
   do not assume every Hermes capability is registered in `tools.registry`.
   Nested host calls must remain visible to `pre_tool_call` and `post_tool_call`.

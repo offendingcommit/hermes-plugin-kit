@@ -1,6 +1,6 @@
 # hermes-plugin-kit
 
-> Lifecycle helpers for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct commands, tools, hooks, skills, validation, and safe logging, baked in.
+> Lifecycle helpers for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct commands, tools, middleware, hooks, skills, validation, and safe logging, baked in.
 
 [![test](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml/badge.svg)](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
@@ -8,8 +8,8 @@
 `hermes-plugin-kit` is a tiny, dependency-free helper for authoring plugins for
 [hermes-agent](https://github.com/NousResearch/hermes-agent). Decorate a slash
 command with `@command`, a tool with `@tool`, or a lifecycle callback with
-`@hook`, then use `register_plugin` to register commands, tools, hooks, and
-plugin-owned skills together. Existing tool-only
+`@middleware` or `@hook`, then use `register_plugin` to register commands,
+tools, middleware, hooks, and plugin-owned skills together. Existing tool-only
 plugins can keep using `register_all`; the LLM-facing schema,
 argument validation, structured logging, and the JSON result envelope are all
 generated for you — correctly, every time.
@@ -132,18 +132,43 @@ That's it. `discord_read_thread` is registered with a `parameters`-wrapped schem
 self-documenting description, required-argument validation, logging, and the JSON
 envelope — none of which you had to write.
 
-## Commands, hooks, and plugin skills
+## Commands, middleware, hooks, and plugin skills
 
 Use the lifecycle entrypoint when a plugin provides more than tools:
 
 ```python
+import time
 from pathlib import Path
-from hermes_plugin_kit import command, hook, plugin_skill, register_plugin
+from hermes_plugin_kit import (
+    MiddlewareKind,
+    command,
+    hook,
+    middleware,
+    plugin_skill,
+    register_plugin,
+)
 
 @command("valdris-status", args_hint="<scope>")
 def valdris_status(raw_args):
     """Show the current Valdris plugin status."""
     return build_status(raw_args)
+
+@middleware(MiddlewareKind.TOOL_REQUEST)
+def normalize_tool_request(**kwargs):
+    args = {**kwargs["args"]}
+    args["workspace"] = normalize_workspace(args.get("workspace"))
+    return {"args": args, "source": "valdris"}
+
+@middleware(MiddlewareKind.TOOL_EXECUTION)
+def measure_tool_execution(**kwargs):
+    started = time.perf_counter()
+    try:
+        return kwargs["next_call"](kwargs["args"])
+    finally:
+        record_tool_latency(
+            kwargs["tool_name"],
+            time.perf_counter() - started,
+        )
 
 @hook("pre_llm_call")
 def inject_context(**kwargs):
@@ -168,6 +193,28 @@ Its handler receives the trailing command text unchanged and may return
 forwarded to Hermes for native command pickers. Command logs include only the
 command name, elapsed time, result type, and argument character count, never
 the raw arguments.
+
+`@middleware` changes runtime behavior rather than merely observing it. Request
+middleware rewrites the effective payload before Hermes continues; execution
+middleware wraps the actual tool or model call through the supplied
+single-use `next_call`. The four current phases are:
+
+- `MiddlewareKind.TOOL_REQUEST`: return `{"args": {...}}` to replace tool
+  arguments before hooks, guardrails, approvals, and execution.
+- `MiddlewareKind.TOOL_EXECUTION`: call `next_call(args)` to wrap the real tool
+  execution and optionally transform its result.
+- `MiddlewareKind.LLM_REQUEST`: return `{"request": {...}}` to replace provider
+  request arguments before the model call.
+- `MiddlewareKind.LLM_EXECUTION`: call `next_call(request)` to wrap the real
+  model execution and optionally transform its result.
+
+Middleware callbacks must be synchronous because Hermes does not await them.
+Each execution callback must call `next_call` at most once. The decorator also
+accepts a non-empty string kind for forward compatibility with future Hermes
+phases. `register_plugin` rejects two callbacks for the same kind within one
+plugin, which prevents registration order from silently deciding behavior.
+Logs contain the kind, elapsed time, result type, and safe correlation IDs, but
+never request payloads or exception messages.
 
 `@hook` forwards Hermes keyword arguments and return values unchanged. It logs
 only the hook name, elapsed time, result type, and supplied `session_id` or

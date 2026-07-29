@@ -1,7 +1,8 @@
 """hermes-plugin-kit — convention-correct surface registration for Hermes plugins.
 
-Reach for ``@tool`` + ``register_all`` and every hermes tool convention is applied
-for you, so the classes of bug that bite hand-written plugins cannot recur:
+Reach for ``@tool`` + ``register_all`` and every Hermes tool convention is
+applied for you. Use ``@command``, ``@middleware``, ``@hook``, and
+``register_plugin`` for the full plugin lifecycle:
 
 - **Schema convention** — arguments are nested under a ``parameters`` wrapper
   (``{name, description, parameters: {type, properties, required,
@@ -19,6 +20,9 @@ for you, so the classes of bug that bite hand-written plugins cannot recur:
   ``(args, **kwargs)`` signature, exactly as the registry requires.
 - **Host invocation** — ``invoke_host_tool`` reaches supported Hermes runtime
   services that are not registry-backed while preserving tool lifecycle hooks.
+- **Middleware** — request callbacks can rewrite tool or model inputs, while
+  execution callbacks wrap the real call through Hermes' single-use
+  ``next_call`` chain.
 
 Usage::
 
@@ -62,6 +66,7 @@ from typing import Any, Callable
 __all__ = [
     "tool",
     "command",
+    "middleware",
     "hook",
     "plugin_skill",
     "register_plugin",
@@ -74,6 +79,7 @@ __all__ = [
     "MediaPayload",
     "ResolvedDeliveryTarget",
     "MediaDeliveryResult",
+    "MiddlewareKind",
     "PluginSkill",
     "RegistrationSummary",
     "register_all",
@@ -88,6 +94,7 @@ __all__ = [
 
 _SPEC_ATTR = "_hpk_tool_spec"
 _COMMAND_SPEC_ATTR = "_hpk_command_spec"
+_MIDDLEWARE_SPEC_ATTR = "_hpk_middleware_spec"
 _HOOK_SPEC_ATTR = "_hpk_hook_spec"
 _REDACT_HINTS = ("token", "secret", "password", "passwd", "api_key", "apikey", "auth")
 _MAX_LOG_CHARS = 200
@@ -131,6 +138,16 @@ class RegistrationSummary:
     skills: tuple[str, ...] = ()
     skipped_optional_skills: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()
+    middlewares: tuple[str, ...] = ()
+
+
+class MiddlewareKind(str, Enum):
+    """Middleware phases currently supported by hermes-agent."""
+
+    TOOL_REQUEST = "tool_request"
+    TOOL_EXECUTION = "tool_execution"
+    LLM_REQUEST = "llm_request"
+    LLM_EXECUTION = "llm_execution"
 
 
 class MediaType(str, Enum):
@@ -397,7 +414,7 @@ def _safe_context(kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# The decorator
+# Decorators
 # ---------------------------------------------------------------------------
 
 def command(
@@ -495,6 +512,65 @@ def command(
                 "args_hint": clean_args_hint,
             },
         )
+        return wrapper
+
+    return decorate
+
+
+def middleware(kind: MiddlewareKind | str) -> Callable:
+    """Mark and instrument a synchronous Hermes middleware callback.
+
+    Known middleware phases are available through :class:`MiddlewareKind`.
+    Non-empty strings are also accepted so plugins can adopt new Hermes phases
+    without waiting for a kit release. Keyword arguments and return values pass
+    through unchanged.
+    """
+    if isinstance(kind, MiddlewareKind):
+        middleware_kind = kind.value
+    elif isinstance(kind, str) and kind.strip():
+        middleware_kind = kind.strip()
+    else:
+        raise ValueError("middleware kind is required")
+
+    def decorate(fn: Callable) -> Callable:
+        if inspect.iscoroutinefunction(fn):
+            raise TypeError(
+                "@middleware callbacks must be synchronous; "
+                "hermes-agent does not await middleware callbacks"
+            )
+        log = logging.getLogger(fn.__module__ or "hermes_plugin_kit")
+
+        @functools.wraps(fn)
+        def wrapper(**kwargs: Any) -> Any:
+            started = time.perf_counter()
+            context = _truncate(_safe_context(kwargs))
+            log.debug(
+                "%s middleware: invoked; context=%s",
+                middleware_kind,
+                context,
+            )
+            try:
+                result = fn(**kwargs)
+            except Exception as exc:
+                log.warning(
+                    "%s middleware: callback raised; elapsed_ms=%.2f; "
+                    "error_type=%s; context=%s",
+                    middleware_kind,
+                    (time.perf_counter() - started) * 1000,
+                    type(exc).__name__,
+                    context,
+                )
+                raise
+            log.info(
+                "%s middleware: ok; elapsed_ms=%.2f; result=%s; context=%s",
+                middleware_kind,
+                (time.perf_counter() - started) * 1000,
+                type(result).__name__,
+                context,
+            )
+            return result
+
+        setattr(wrapper, _MIDDLEWARE_SPEC_ATTR, {"kind": middleware_kind})
         return wrapper
 
     return decorate
@@ -1240,7 +1316,7 @@ def register_plugin(
     module: Any,
     skills: tuple[PluginSkill, ...] | list[PluginSkill] = (),
 ) -> RegistrationSummary:
-    """Register decorated commands, tools, hooks, and skills from *module*.
+    """Register decorated commands, tools, middleware, hooks, and skills.
 
     Unlike the backward-compatible :func:`register_all`, this lifecycle-level
     entrypoint rejects distinct declarations that share a public name. Missing
@@ -1252,6 +1328,7 @@ def register_plugin(
 
     commands: dict[str, Callable] = {}
     tools: dict[str, Callable] = {}
+    middlewares: dict[str, Callable] = {}
     hooks: dict[str, Callable] = {}
     for _, obj in inspect.getmembers(module):
         command_spec = getattr(obj, _COMMAND_SPEC_ATTR, None)
@@ -1267,6 +1344,15 @@ def register_plugin(
             if existing is not None and existing is not obj:
                 raise ValueError(f"duplicate tool name: {tool_spec['name']}")
             tools[tool_spec["name"]] = obj
+
+        middleware_spec = getattr(obj, _MIDDLEWARE_SPEC_ATTR, None)
+        if middleware_spec:
+            existing = middlewares.get(middleware_spec["kind"])
+            if existing is not None and existing is not obj:
+                raise ValueError(
+                    f"duplicate middleware kind: {middleware_spec['kind']}"
+                )
+            middlewares[middleware_spec["kind"]] = obj
 
         hook_spec = getattr(obj, _HOOK_SPEC_ATTR, None)
         if hook_spec:
@@ -1318,6 +1404,11 @@ def register_plugin(
         _register_tool(ctx, obj, spec)
         registered_tools.append(name)
 
+    registered_middlewares: list[str] = []
+    for kind in sorted(middlewares):
+        ctx.register_middleware(kind, middlewares[kind])
+        registered_middlewares.append(kind)
+
     registered_hooks: list[str] = []
     for name in sorted(hooks):
         ctx.register_hook(name, hooks[name])
@@ -1335,15 +1426,17 @@ def register_plugin(
     summary = RegistrationSummary(
         commands=tuple(registered_commands),
         tools=tuple(registered_tools),
+        middlewares=tuple(registered_middlewares),
         hooks=tuple(registered_hooks),
         skills=tuple(registered_skills),
         skipped_optional_skills=tuple(skipped_skills),
     )
     log.info(
         "hermes_plugin_kit: registered plugin lifecycle; commands=%s; tools=%s; "
-        "hooks=%s; skills=%s; skipped_optional_skills=%s",
+        "middlewares=%s; hooks=%s; skills=%s; skipped_optional_skills=%s",
         ",".join(summary.commands) or "<none>",
         ",".join(summary.tools) or "<none>",
+        ",".join(summary.middlewares) or "<none>",
         ",".join(summary.hooks) or "<none>",
         ",".join(summary.skills) or "<none>",
         ",".join(summary.skipped_optional_skills) or "<none>",
