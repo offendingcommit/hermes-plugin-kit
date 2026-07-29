@@ -1,4 +1,4 @@
-"""hermes-plugin-kit — convention-correct tool registration for hermes-agent plugins.
+"""hermes-plugin-kit — convention-correct surface registration for Hermes plugins.
 
 Reach for ``@tool`` + ``register_all`` and every hermes tool convention is applied
 for you, so the classes of bug that bite hand-written plugins cannot recur:
@@ -61,6 +61,7 @@ from typing import Any, Callable
 
 __all__ = [
     "tool",
+    "command",
     "hook",
     "plugin_skill",
     "register_plugin",
@@ -86,10 +87,12 @@ __all__ = [
 ]
 
 _SPEC_ATTR = "_hpk_tool_spec"
+_COMMAND_SPEC_ATTR = "_hpk_command_spec"
 _HOOK_SPEC_ATTR = "_hpk_hook_spec"
 _REDACT_HINTS = ("token", "secret", "password", "passwd", "api_key", "apikey", "auth")
 _MAX_LOG_CHARS = 200
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_COMMAND_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
 _AGENT_LOOP_TOOL_NAMES = frozenset({"todo", "memory", "session_search", "delegate_task"})
 _RESERVED_NAMESPACE_PREFIXES = ("memory_",)
 _SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
@@ -127,6 +130,7 @@ class RegistrationSummary:
     hooks: tuple[str, ...] = ()
     skills: tuple[str, ...] = ()
     skipped_optional_skills: tuple[str, ...] = ()
+    commands: tuple[str, ...] = ()
 
 
 class MediaType(str, Enum):
@@ -395,6 +399,106 @@ def _safe_context(kwargs: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # The decorator
 # ---------------------------------------------------------------------------
+
+def command(
+    name: str,
+    description: str | None = None,
+    args_hint: str = "",
+) -> Callable:
+    """Mark and instrument a Hermes in-session slash command.
+
+    ``name`` is the bare command name without a leading slash. The wrapped
+    handler receives the original ``raw_args`` string and returns ``str | None``.
+    Synchronous and asynchronous handlers preserve their native callable shape.
+    """
+    if not isinstance(name, str) or not _COMMAND_NAME_RE.fullmatch(name):
+        raise ValueError(
+            "command name must be a bare lowercase kebab-case name matching "
+            f"{_COMMAND_NAME_RE.pattern!r}"
+        )
+    if description is not None and not isinstance(description, str):
+        raise TypeError("command description must be a string or None")
+    if not isinstance(args_hint, str):
+        raise TypeError("command args_hint must be a string")
+    clean_args_hint = args_hint.strip()
+
+    def decorate(fn: Callable) -> Callable:
+        explicit_description = (description or "").strip()
+        doc = explicit_description or (inspect.getdoc(fn) or "").strip()
+        if not doc:
+            raise ValueError(
+                f"@command {name!r}: a description is required "
+                "(docstring or description=)."
+            )
+        log = logging.getLogger(fn.__module__ or "hermes_plugin_kit")
+
+        def log_invocation(raw_args: str) -> float:
+            started = time.perf_counter()
+            try:
+                args_chars = len(raw_args)
+            except TypeError:
+                args_chars = len(str(raw_args))
+            log.debug("%s: invoked; args_chars=%d", name, args_chars)
+            return started
+
+        def log_failure(started: float, exc: Exception) -> None:
+            log.warning(
+                "%s: handler raised; elapsed_ms=%.2f; error_type=%s",
+                name,
+                (time.perf_counter() - started) * 1000,
+                type(exc).__name__,
+            )
+
+        def log_success(started: float, result: Any) -> None:
+            log.info(
+                "%s: ok; elapsed_ms=%.2f; result=%s",
+                name,
+                (time.perf_counter() - started) * 1000,
+                type(result).__name__,
+            )
+
+        if inspect.iscoroutinefunction(fn):
+
+            @functools.wraps(fn)
+            async def async_wrapper(raw_args: str) -> str | None:
+                started = log_invocation(raw_args)
+                try:
+                    result = await fn(raw_args)
+                except Exception as exc:
+                    log_failure(started, exc)
+                    raise
+                log_success(started, result)
+                return result
+
+            wrapper = async_wrapper
+        else:
+
+            @functools.wraps(fn)
+            def sync_wrapper(raw_args: str) -> str | None:
+                started = log_invocation(raw_args)
+                try:
+                    result = fn(raw_args)
+                except Exception as exc:
+                    log_failure(started, exc)
+                    raise
+                log_success(started, result)
+                return result
+
+            wrapper = sync_wrapper
+
+        setattr(
+            wrapper,
+            _COMMAND_SPEC_ATTR,
+            {
+                "name": name,
+                "description": doc,
+                "args_hint": clean_args_hint,
+            },
+        )
+        return wrapper
+
+    return decorate
+
 
 def hook(name: str) -> Callable:
     """Mark and instrument a Hermes lifecycle hook callback.
@@ -1136,7 +1240,7 @@ def register_plugin(
     module: Any,
     skills: tuple[PluginSkill, ...] | list[PluginSkill] = (),
 ) -> RegistrationSummary:
-    """Register decorated tools, hooks, and declared skills from *module*.
+    """Register decorated commands, tools, hooks, and skills from *module*.
 
     Unlike the backward-compatible :func:`register_all`, this lifecycle-level
     entrypoint rejects distinct declarations that share a public name. Missing
@@ -1146,9 +1250,17 @@ def register_plugin(
         module = sys.modules[module]
     log = logging.getLogger(getattr(module, "__name__", "hermes_plugin_kit"))
 
+    commands: dict[str, Callable] = {}
     tools: dict[str, Callable] = {}
     hooks: dict[str, Callable] = {}
     for _, obj in inspect.getmembers(module):
+        command_spec = getattr(obj, _COMMAND_SPEC_ATTR, None)
+        if command_spec:
+            existing = commands.get(command_spec["name"])
+            if existing is not None and existing is not obj:
+                raise ValueError(f"duplicate command name: {command_spec['name']}")
+            commands[command_spec["name"]] = obj
+
         tool_spec = getattr(obj, _SPEC_ATTR, None)
         if tool_spec:
             existing = tools.get(tool_spec["name"])
@@ -1187,6 +1299,18 @@ def register_plugin(
         )
         skipped_skills.append(name)
 
+    registered_commands: list[str] = []
+    for name in sorted(commands):
+        obj = commands[name]
+        spec = getattr(obj, _COMMAND_SPEC_ATTR)
+        ctx.register_command(
+            name=spec["name"],
+            handler=obj,
+            description=spec["description"],
+            args_hint=spec["args_hint"],
+        )
+        registered_commands.append(name)
+
     registered_tools: list[str] = []
     for name in sorted(tools):
         obj = tools[name]
@@ -1209,14 +1333,16 @@ def register_plugin(
         registered_skills.append(skill.name)
 
     summary = RegistrationSummary(
+        commands=tuple(registered_commands),
         tools=tuple(registered_tools),
         hooks=tuple(registered_hooks),
         skills=tuple(registered_skills),
         skipped_optional_skills=tuple(skipped_skills),
     )
     log.info(
-        "hermes_plugin_kit: registered plugin lifecycle; tools=%s; hooks=%s; "
-        "skills=%s; skipped_optional_skills=%s",
+        "hermes_plugin_kit: registered plugin lifecycle; commands=%s; tools=%s; "
+        "hooks=%s; skills=%s; skipped_optional_skills=%s",
+        ",".join(summary.commands) or "<none>",
         ",".join(summary.tools) or "<none>",
         ",".join(summary.hooks) or "<none>",
         ",".join(summary.skills) or "<none>",

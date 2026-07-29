@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import sys
 import tempfile
@@ -23,8 +24,12 @@ class FakeCtx:
 class FakePluginCtx(FakeCtx):
     def __init__(self) -> None:
         super().__init__()
+        self.commands: list[dict] = []
         self.hooks: list[tuple[str, object]] = []
         self.skills: list[dict] = []
+
+    def register_command(self, **kwargs) -> None:
+        self.commands.append(kwargs)
 
     def register_hook(self, hook_name, callback) -> None:
         self.hooks.append((hook_name, callback))
@@ -240,6 +245,99 @@ class HookBehaviorTests(unittest.TestCase):
     def test_hook_name_is_required(self) -> None:
         with self.assertRaisesRegex(ValueError, "hook name"):
             hpk.hook("")
+
+
+class CommandBehaviorTests(unittest.IsolatedAsyncioTestCase):
+    def test_forwards_raw_args_and_uses_docstring_description(self) -> None:
+        @hpk.command("valdris-status", args_hint="  <scope>  ")
+        def status(raw_args):
+            """  Show Valdris status.  """
+            return f"status:{raw_args}"
+
+        spec = getattr(status, "_hpk_command_spec")
+        self.assertEqual(spec["name"], "valdris-status")
+        self.assertEqual(spec["description"], "Show Valdris status.")
+        self.assertEqual(spec["args_hint"], "<scope>")
+
+        raw_args = "  exact input --keep-spacing  "
+        with self.assertLogs(level="DEBUG") as cap:
+            self.assertEqual(status(raw_args), f"status:{raw_args}")
+        joined = "\n".join(cap.output)
+        self.assertIn("valdris-status: invoked", joined)
+        self.assertIn(f"args_chars={len(raw_args)}", joined)
+        self.assertNotIn(raw_args, joined)
+        self.assertRegex(joined, r"elapsed_ms=\d+\.\d{2}")
+        self.assertIn("result=str", joined)
+
+    async def test_async_handler_remains_async_and_returns_none(self) -> None:
+        @hpk.command("valdris-sync", description="Synchronize Valdris.")
+        async def sync(raw_args):
+            self.assertEqual(raw_args, "apply")
+            return None
+
+        self.assertTrue(inspect.iscoroutinefunction(sync))
+        with self.assertLogs(level="INFO") as cap:
+            self.assertIsNone(await sync("apply"))
+        self.assertIn("result=NoneType", "\n".join(cap.output))
+
+    def test_reraises_without_logging_args_or_exception_message(self) -> None:
+        @hpk.command("valdris-fail", description="Fail safely.")
+        def fail(raw_args):
+            raise RuntimeError("private command failure")
+
+        with self.assertLogs(level="WARNING") as cap:
+            with self.assertRaisesRegex(RuntimeError, "private command failure"):
+                fail("private command arguments")
+        joined = "\n".join(cap.output)
+        self.assertIn("error_type=RuntimeError", joined)
+        self.assertNotIn("private command failure", joined)
+        self.assertNotIn("private command arguments", joined)
+
+    def test_rejects_invalid_names(self) -> None:
+        for name in (
+            "",
+            "/valdris-status",
+            "Valdris",
+            "valdris status",
+            "valdris_status",
+            "9valdris",
+            "valdris-",
+        ):
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError, "command name"
+            ):
+                hpk.command(name)
+
+    def test_requires_description_or_docstring(self) -> None:
+        with self.assertRaisesRegex(ValueError, "description is required"):
+
+            @hpk.command("valdris-empty")
+            def empty(raw_args):
+                return raw_args
+
+    def test_description_argument_overrides_docstring(self) -> None:
+        @hpk.command("valdris-help", description="  Explicit description.  ")
+        def help_command(raw_args):
+            """Ignored description."""
+            return raw_args
+
+        spec = getattr(help_command, "_hpk_command_spec")
+        self.assertEqual(spec["description"], "Explicit description.")
+
+    def test_blank_description_falls_back_to_docstring(self) -> None:
+        @hpk.command("valdris-help", description="   ")
+        def help_command(raw_args):
+            """Show Valdris help."""
+            return raw_args
+
+        spec = getattr(help_command, "_hpk_command_spec")
+        self.assertEqual(spec["description"], "Show Valdris help.")
+
+    def test_description_and_args_hint_must_be_strings(self) -> None:
+        with self.assertRaisesRegex(TypeError, "description"):
+            hpk.command("valdris-help", description=object())
+        with self.assertRaisesRegex(TypeError, "args_hint"):
+            hpk.command("valdris-help", description="Help.", args_hint=object())
 
 
 class HostToolInvocationTests(unittest.TestCase):
@@ -756,7 +854,15 @@ class RegisterPluginTests(unittest.TestCase):
             setattr(module, name, value)
         return module
 
-    def test_registers_tools_hooks_and_skills_with_summary(self) -> None:
+    def test_registers_commands_tools_hooks_and_skills_with_summary(self) -> None:
+        @hpk.command(
+            "valdris-status",
+            description="Show Valdris status.",
+            args_hint="<scope>",
+        )
+        def command_handler(raw_args):
+            return raw_args
+
         @hpk.hook("pre_llm_call")
         def callback(**kwargs):
             return kwargs
@@ -768,16 +874,33 @@ class RegisterPluginTests(unittest.TestCase):
                 "temporal-awareness", skill_path, "Use local timing context."
             )
             ctx = FakePluginCtx()
-            module = self._module(callback=callback, sample_read=sample_read)
+            module = self._module(
+                callback=callback,
+                command_handler=command_handler,
+                sample_read=sample_read,
+            )
             with self.assertLogs(level="INFO") as cap:
                 summary = hpk.register_plugin(ctx, module, skills=(skill,))
 
+        self.assertEqual(summary.commands, ("valdris-status",))
         self.assertEqual(summary.tools, ("sample_read_thread",))
         self.assertEqual(summary.hooks, ("pre_llm_call",))
         self.assertEqual(summary.skills, ("temporal-awareness",))
         self.assertEqual(summary.skipped_optional_skills, ())
+        self.assertEqual(
+            ctx.commands,
+            [
+                {
+                    "name": "valdris-status",
+                    "handler": command_handler,
+                    "description": "Show Valdris status.",
+                    "args_hint": "<scope>",
+                }
+            ],
+        )
         self.assertEqual(ctx.hooks, [("pre_llm_call", callback)])
         self.assertEqual(ctx.skills[0]["name"], "temporal-awareness")
+        self.assertIn("commands=valdris-status", "\n".join(cap.output))
         self.assertIn("tools=sample_read_thread", "\n".join(cap.output))
         self.assertIn("hooks=pre_llm_call", "\n".join(cap.output))
         self.assertIn("skills=temporal-awareness", "\n".join(cap.output))
@@ -844,6 +967,21 @@ class RegisterPluginTests(unittest.TestCase):
         ctx = FakePluginCtx()
         with self.assertRaisesRegex(ValueError, "duplicate tool"):
             hpk.register_plugin(ctx, self._module(first=first, second=second))
+        self.assertEqual(ctx.tools, [])
+
+    def test_rejects_duplicate_command_names_before_registration(self) -> None:
+        @hpk.command("valdris-status", description="First status.")
+        def first(raw_args):
+            return raw_args
+
+        @hpk.command("valdris-status", description="Second status.")
+        def second(raw_args):
+            return raw_args
+
+        ctx = FakePluginCtx()
+        with self.assertRaisesRegex(ValueError, "duplicate command"):
+            hpk.register_plugin(ctx, self._module(first=first, second=second))
+        self.assertEqual(ctx.commands, [])
         self.assertEqual(ctx.tools, [])
 
     def test_rejects_duplicate_skill_names(self) -> None:

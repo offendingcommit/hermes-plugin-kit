@@ -49,6 +49,7 @@ def _import_real_hermes():
             PluginManager,
             PluginManifest,
             VALID_HOOKS,
+            resolve_plugin_command_result,
         )
         from tools.registry import registry  # type: ignore
 
@@ -64,6 +65,7 @@ def _import_real_hermes():
             PluginManager=PluginManager,
             PluginManifest=PluginManifest,
             VALID_HOOKS=set(VALID_HOOKS),
+            resolve_plugin_command_result=resolve_plugin_command_result,
             registry=registry,
         )
 
@@ -113,6 +115,15 @@ def hpk_contract_probe(args, **kwargs):
 
 
 _SPEC = getattr(hpk_contract_probe, "_hpk_tool_spec")
+
+
+@hpk.command(
+    "hpk-contract-probe",
+    description="Probe command registration.",
+    args_hint="<value>",
+)
+async def hpk_command_contract_probe(raw_args):
+    return f"command:{raw_args}"
 
 
 @unittest.skipUnless(_REAL is not None, "hermes-agent source not importable")
@@ -199,7 +210,35 @@ class HermesContractTests(unittest.TestCase):
             )
             self.assertEqual(manager.find_plugin_skill("contract-plugin:probe"), path)
 
+    def test_command_registers_and_dispatches_through_real_plugin_context(self) -> None:
+        manager = _REAL.PluginManager()
+        manifest = _REAL.PluginManifest(name="contract-plugin")
+        ctx = _REAL.PluginContext(manifest, manager)
+        module = types.ModuleType("contract_command_plugin")
+        module.hpk_command_contract_probe = hpk_command_contract_probe
+
+        summary = hpk.register_plugin(ctx, module)
+
+        self.assertEqual(summary.commands, ("hpk-contract-probe",))
+        entry = manager._plugin_commands["hpk-contract-probe"]
+        self.assertEqual(entry["description"], "Probe command registration.")
+        self.assertEqual(entry["args_hint"], "<value>")
+        result = entry["handler"]("exact raw args")
+        self.assertEqual(
+            _REAL.resolve_plugin_command_result(result),
+            "command:exact raw args",
+        )
+
     def test_lifecycle_calls_bind_to_real_plugincontext_signatures(self) -> None:
+        command_sig = inspect.signature(_REAL.PluginContext.register_command)
+        command_sig.bind(
+            None,
+            name="probe-command",
+            handler=lambda raw_args: raw_args,
+            description="Probe command.",
+            args_hint="<value>",
+        )
+
         hook_sig = inspect.signature(_REAL.PluginContext.register_hook)
         hook_sig.bind(None, "pre_llm_call", lambda **kwargs: None)
 
