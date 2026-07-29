@@ -25,11 +25,15 @@ class FakePluginCtx(FakeCtx):
     def __init__(self) -> None:
         super().__init__()
         self.commands: list[dict] = []
+        self.middlewares: list[tuple[str, object]] = []
         self.hooks: list[tuple[str, object]] = []
         self.skills: list[dict] = []
 
     def register_command(self, **kwargs) -> None:
         self.commands.append(kwargs)
+
+    def register_middleware(self, kind, callback) -> None:
+        self.middlewares.append((kind, callback))
 
     def register_hook(self, hook_name, callback) -> None:
         self.hooks.append((hook_name, callback))
@@ -245,6 +249,75 @@ class HookBehaviorTests(unittest.TestCase):
     def test_hook_name_is_required(self) -> None:
         with self.assertRaisesRegex(ValueError, "hook name"):
             hpk.hook("")
+
+
+class MiddlewareBehaviorTests(unittest.TestCase):
+    def test_known_kinds_forward_kwargs_and_return_values(self) -> None:
+        expected = {
+            hpk.MiddlewareKind.TOOL_REQUEST,
+            hpk.MiddlewareKind.TOOL_EXECUTION,
+            hpk.MiddlewareKind.LLM_REQUEST,
+            hpk.MiddlewareKind.LLM_EXECUTION,
+        }
+        self.assertEqual(set(hpk.MiddlewareKind), expected)
+
+        for kind in expected:
+            marker = object()
+
+            @hpk.middleware(kind)
+            def callback(**kwargs):
+                self.assertIs(kwargs["payload"], marker)
+                return marker
+
+            with self.subTest(kind=kind), self.assertLogs(level="DEBUG") as cap:
+                self.assertIs(
+                    callback(payload=marker, session_id="session-1"),
+                    marker,
+                )
+            spec = getattr(callback, "_hpk_middleware_spec")
+            self.assertEqual(spec["kind"], kind.value)
+            joined = "\n".join(cap.output)
+            self.assertIn(f"{kind.value} middleware: invoked", joined)
+            self.assertIn("session-1", joined)
+            self.assertNotIn(repr(marker), joined)
+            self.assertRegex(joined, r"elapsed_ms=\d+\.\d{2}")
+
+    def test_accepts_future_string_kind(self) -> None:
+        @hpk.middleware("  future_request  ")
+        def callback(**kwargs):
+            return kwargs
+
+        self.assertEqual(
+            getattr(callback, "_hpk_middleware_spec"),
+            {"kind": "future_request"},
+        )
+
+    def test_rejects_missing_kind_and_async_callback(self) -> None:
+        for kind in ("", "   ", None):
+            with self.subTest(kind=kind), self.assertRaisesRegex(
+                ValueError, "middleware kind"
+            ):
+                hpk.middleware(kind)
+
+        async def async_callback(**kwargs):
+            return kwargs
+
+        with self.assertRaisesRegex(TypeError, "must be synchronous"):
+            hpk.middleware(hpk.MiddlewareKind.TOOL_REQUEST)(async_callback)
+
+    def test_reraises_without_logging_payload_or_exception_message(self) -> None:
+        @hpk.middleware(hpk.MiddlewareKind.TOOL_REQUEST)
+        def callback(**kwargs):
+            raise RuntimeError("private middleware failure")
+
+        with self.assertLogs(level="WARNING") as cap:
+            with self.assertRaisesRegex(RuntimeError, "private middleware failure"):
+                callback(args={"token": "private-token"}, task_id="task-1")
+        joined = "\n".join(cap.output)
+        self.assertIn("error_type=RuntimeError", joined)
+        self.assertIn("task-1", joined)
+        self.assertNotIn("private middleware failure", joined)
+        self.assertNotIn("private-token", joined)
 
 
 class CommandBehaviorTests(unittest.IsolatedAsyncioTestCase):
@@ -854,7 +927,7 @@ class RegisterPluginTests(unittest.TestCase):
             setattr(module, name, value)
         return module
 
-    def test_registers_commands_tools_hooks_and_skills_with_summary(self) -> None:
+    def test_registers_all_lifecycle_surfaces_with_summary(self) -> None:
         @hpk.command(
             "valdris-status",
             description="Show Valdris status.",
@@ -867,6 +940,10 @@ class RegisterPluginTests(unittest.TestCase):
         def callback(**kwargs):
             return kwargs
 
+        @hpk.middleware(hpk.MiddlewareKind.TOOL_REQUEST)
+        def request_middleware(**kwargs):
+            return {"args": kwargs["args"]}
+
         with tempfile.TemporaryDirectory() as tmp:
             skill_path = Path(tmp) / "SKILL.md"
             skill_path.write_text("# Skill\n")
@@ -877,6 +954,7 @@ class RegisterPluginTests(unittest.TestCase):
             module = self._module(
                 callback=callback,
                 command_handler=command_handler,
+                request_middleware=request_middleware,
                 sample_read=sample_read,
             )
             with self.assertLogs(level="INFO") as cap:
@@ -884,6 +962,7 @@ class RegisterPluginTests(unittest.TestCase):
 
         self.assertEqual(summary.commands, ("valdris-status",))
         self.assertEqual(summary.tools, ("sample_read_thread",))
+        self.assertEqual(summary.middlewares, ("tool_request",))
         self.assertEqual(summary.hooks, ("pre_llm_call",))
         self.assertEqual(summary.skills, ("temporal-awareness",))
         self.assertEqual(summary.skipped_optional_skills, ())
@@ -898,10 +977,15 @@ class RegisterPluginTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(
+            ctx.middlewares,
+            [("tool_request", request_middleware)],
+        )
         self.assertEqual(ctx.hooks, [("pre_llm_call", callback)])
         self.assertEqual(ctx.skills[0]["name"], "temporal-awareness")
         self.assertIn("commands=valdris-status", "\n".join(cap.output))
         self.assertIn("tools=sample_read_thread", "\n".join(cap.output))
+        self.assertIn("middlewares=tool_request", "\n".join(cap.output))
         self.assertIn("hooks=pre_llm_call", "\n".join(cap.output))
         self.assertIn("skills=temporal-awareness", "\n".join(cap.output))
 
@@ -952,6 +1036,21 @@ class RegisterPluginTests(unittest.TestCase):
             hpk.register_plugin(
                 FakePluginCtx(), self._module(first=first, second=second)
             )
+
+    def test_rejects_duplicate_middleware_kinds_before_registration(self) -> None:
+        @hpk.middleware(hpk.MiddlewareKind.TOOL_EXECUTION)
+        def first(**kwargs):
+            return kwargs["next_call"](kwargs["args"])
+
+        @hpk.middleware("tool_execution")
+        def second(**kwargs):
+            return kwargs["next_call"](kwargs["args"])
+
+        ctx = FakePluginCtx()
+        with self.assertRaisesRegex(ValueError, "duplicate middleware"):
+            hpk.register_plugin(ctx, self._module(first=first, second=second))
+        self.assertEqual(ctx.middlewares, [])
+        self.assertEqual(ctx.tools, [])
 
     def test_rejects_duplicate_tool_names(self) -> None:
         @hpk.tool(toolset="sample", name="sample_duplicate")
