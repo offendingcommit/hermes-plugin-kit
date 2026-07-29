@@ -1,14 +1,15 @@
 # hermes-plugin-kit
 
-> Lifecycle helpers for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct tools, hooks, skills, validation, and safe logging, baked in.
+> Lifecycle helpers for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct commands, tools, hooks, skills, validation, and safe logging, baked in.
 
 [![test](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml/badge.svg)](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 `hermes-plugin-kit` is a tiny, dependency-free helper for authoring plugins for
-[hermes-agent](https://github.com/NousResearch/hermes-agent). Decorate a tool
-with `@tool` or a lifecycle callback with `@hook`, then use `register_plugin` to
-register tools, hooks, and plugin-owned skills together. Existing tool-only
+[hermes-agent](https://github.com/NousResearch/hermes-agent). Decorate a slash
+command with `@command`, a tool with `@tool`, or a lifecycle callback with
+`@hook`, then use `register_plugin` to register commands, tools, hooks, and
+plugin-owned skills together. Existing tool-only
 plugins can keep using `register_all`; the LLM-facing schema,
 argument validation, structured logging, and the JSON result envelope are all
 generated for you — correctly, every time.
@@ -131,13 +132,18 @@ That's it. `discord_read_thread` is registered with a `parameters`-wrapped schem
 self-documenting description, required-argument validation, logging, and the JSON
 envelope — none of which you had to write.
 
-## Hooks and plugin skills
+## Commands, hooks, and plugin skills
 
 Use the lifecycle entrypoint when a plugin provides more than tools:
 
 ```python
 from pathlib import Path
-from hermes_plugin_kit import hook, plugin_skill, register_plugin
+from hermes_plugin_kit import command, hook, plugin_skill, register_plugin
+
+@command("valdris-status", args_hint="<scope>")
+def valdris_status(raw_args):
+    """Show the current Valdris plugin status."""
+    return build_status(raw_args)
 
 @hook("pre_llm_call")
 def inject_context(**kwargs):
@@ -155,6 +161,13 @@ SKILLS = (
 def register(ctx):
     return register_plugin(ctx, __name__, skills=SKILLS)
 ```
+
+`@command` requires a bare lowercase kebab-case name without the leading slash.
+Its handler receives the trailing command text unchanged and may return
+`str | None` synchronously or asynchronously. The optional `args_hint` is
+forwarded to Hermes for native command pickers. Command logs include only the
+command name, elapsed time, result type, and argument character count, never
+the raw arguments.
 
 `@hook` forwards Hermes keyword arguments and return values unchanged. It logs
 only the hook name, elapsed time, result type, and supplied `session_id` or

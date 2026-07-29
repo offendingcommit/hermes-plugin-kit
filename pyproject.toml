@@ -8,8 +8,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-plugin-kit"
-version = "0.3.0"
-description = "Convention-correct lifecycle registration for hermes-agent plugins."
+version = "0.4.0"
+description = "Convention-correct command and lifecycle registration for hermes-agent plugins."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -20,10 +20,10 @@ dependencies = []
 [project.urls]
 Repository = "https://github.com/offendingcommit/hermes-plugin-kit"
 
-# Runtime stays dependency-free. PyYAML is dev-only: the hermes contract tests
-# import hermes_cli.plugins, which transitively needs yaml. Skipped without it.
+# Runtime stays dependency-free. The hermes contract tests import current
+# upstream source, whose plugin and gateway seams transitively need these.
 [dependency-groups]
-dev = ["pyyaml"]
+dev = ["pyyaml", "requests==2.33.0"]
 
 [tool.setuptools]
 packages = ["hermes_plugin_kit"]
