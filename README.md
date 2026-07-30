@@ -247,8 +247,8 @@ def register(ctx):
 
 `load_plugin_config` accepts a non-empty `manifest.config` for tests and older
 hosts. On current Hermes it reads `plugins.<name>` through
-`load_config_readonly()` and returns a shallow copy so plugin code cannot
-mutate Hermes' cached configuration.
+`load_config_readonly()` and returns a deep copy so plugin code cannot mutate
+Hermes' cached configuration through nested values.
 
 `configure_stderr_logging` installs one idempotent INFO handler only when its
 operator-owned environment flag is enabled. This makes registration receipts

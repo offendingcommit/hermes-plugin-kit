@@ -49,6 +49,7 @@ Usage::
 
 from __future__ import annotations
 
+import copy
 import functools
 import importlib
 import inspect
@@ -164,8 +165,8 @@ def load_plugin_config(
     Current Hermes ``PluginManifest`` objects do not carry runtime profile
     configuration. ``manifest.config`` remains a compatibility seam for tests
     and older hosts; otherwise this reads ``plugins.<plugin_name>`` through
-    Hermes' read-only effective config loader. A shallow copy prevents plugin
-    code from mutating the host config cache.
+    Hermes' read-only effective config loader. A deep copy prevents plugin code
+    from mutating the host config cache through nested mappings or lists.
     """
     clean_name = str(plugin_name or "").strip()
     if not clean_name:
@@ -173,7 +174,7 @@ def load_plugin_config(
     manifest = getattr(ctx, "manifest", None)
     manifest_config = getattr(manifest, "config", None)
     if isinstance(manifest_config, dict) and manifest_config:
-        return dict(manifest_config)
+        return copy.deepcopy(manifest_config)
     if config_loader is None:
         try:
             from hermes_cli.config import load_config_readonly
@@ -191,7 +192,7 @@ def load_plugin_config(
         return {}
     plugins = effective.get("plugins") if isinstance(effective, dict) else None
     plugin_config = plugins.get(clean_name) if isinstance(plugins, dict) else None
-    return dict(plugin_config) if isinstance(plugin_config, dict) else {}
+    return copy.deepcopy(plugin_config) if isinstance(plugin_config, dict) else {}
 
 
 def configure_stderr_logging(

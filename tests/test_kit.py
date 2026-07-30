@@ -76,6 +76,10 @@ class RuntimeCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(result, {"authored_memory": {"enabled": True}})
         self.assertIsNot(result, effective["plugins"]["memory-sync"])
+        self.assertIsNot(
+            result["authored_memory"],
+            effective["plugins"]["memory-sync"]["authored_memory"],
+        )
 
     def test_stderr_logging_is_operator_gated_and_idempotent(self) -> None:
         logger = logging.getLogger("hpk-runtime-compatibility-test")
