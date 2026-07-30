@@ -29,6 +29,9 @@ plugin.
   `register_plugin` with an explicit receipt identity. Iterable registration
   must retain module registration's duplicate checks, deterministic ordering,
   skills, and `RegistrationSummary` contract.
+- Consumer plugins must pin this package to an immutable commit, not a moving
+  branch. Profiles that install multiple plugins into one Python environment
+  must keep every consumer on the same kit revision.
 - Use `invoke_host_tool` for host-managed capabilities such as `send_message`;
   do not assume every Hermes capability is registered in `tools.registry`.
   Nested host calls must remain visible to `pre_tool_call` and `post_tool_call`.
