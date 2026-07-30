@@ -11,9 +11,10 @@ in-session slash command or terminal CLI subcommand with `@command`, a tool
 with `@tool`, or a lifecycle callback with `@middleware` or `@hook`, then use
 `register_plugin` to register commands, tools, middleware, hooks, and
 plugin-owned skills together. Existing tool-only plugins can keep using
-`register_all`; the LLM-facing schema,
-argument validation, structured logging, and the JSON result envelope are all
-generated for you — correctly, every time.
+`register_all` for backward compatibility, but new and migrated plugins should
+use `register_plugin` so every surface and the lifecycle receipt share one
+contract. The LLM-facing schema, argument validation, structured logging, and
+the JSON result envelope are all generated for you — correctly, every time.
 
 ## Motivation
 
@@ -56,7 +57,8 @@ the same boilerplate. `hermes-plugin-kit` makes them structurally impossible:
 - **Logging** — `DEBUG` when a tool is invoked, `WARNING` on rejected calls and
   exceptions (including tracebacks), and `INFO` on success with elapsed time and
   result mode. Arguments are truncated and nested secret-looking values are
-  recursively redacted. `register_all` also logs the registered tool inventory.
+  recursively redacted. `register_plugin` emits one exact lifecycle inventory;
+  legacy `register_all` still logs its tool inventory.
 - **Envelope + safety** — return a plain `dict` (or raise); the kit encodes the JSON
   string, catches exceptions, and always returns `str` from an `(args, **kwargs)`
   handler.
@@ -99,7 +101,7 @@ hermes-plugin-kit = { git = "https://github.com/offendingcommit/hermes-plugin-ki
 `tools.py`:
 
 ```python
-from hermes_plugin_kit import tool, tool_name, register_all, str_arg, int_arg
+from hermes_plugin_kit import tool, tool_name, register_plugin, str_arg, int_arg
 
 @tool(
     toolset="messaging",
@@ -122,16 +124,48 @@ def discord_read_thread(args, **kwargs):
 `__init__.py`:
 
 ```python
-from hermes_plugin_kit import register_all
+from hermes_plugin_kit import register_plugin
 from . import tools
 
 def register(ctx):
-    register_all(ctx, tools.__name__)
+    return register_plugin(ctx, tools)
 ```
 
-That's it. `discord_read_thread` is registered with a `parameters`-wrapped schema, a
-self-documenting description, required-argument validation, logging, and the JSON
-envelope — none of which you had to write.
+That's it. `discord_read_thread` is registered with a `parameters`-wrapped
+schema, a self-documenting description, required-argument validation, logging,
+the JSON envelope, and the same exact registration receipt used by plugins with
+hooks, commands, middleware, or skills.
+
+Plugins that already own a Hermes function schema can adopt the same decorator
+without rebuilding their schema from `params`:
+
+```python
+LEGACY_WRITE_SCHEMA = {
+    "description": "Write one entry through the existing memory service.",
+    "parameters": {
+        "type": "object",
+        "properties": {"content": {"type": "string"}},
+        "required": ["content"],
+        "additionalProperties": False,
+    },
+}
+
+@tool(
+    name="workspace_write_entry",
+    toolset="memory-sync",
+    schema=LEGACY_WRITE_SCHEMA,
+    validate_required=False,
+)
+def workspace_write_entry(args, **kwargs):
+    return legacy_service.write(args)
+```
+
+`schema` and `params` are mutually exclusive. The kit deep-copies and validates
+a supplied schema, including its `parameters` shape and required-property
+references. Required fields stay visible to the model. The default
+`validate_required=True` keeps the kit's instructive missing-argument response;
+set it to `False` only when an existing handler must retain its established
+validation and error payload.
 
 ## Commands, middleware, hooks, and plugin skills
 
@@ -201,6 +235,29 @@ SKILLS = (
 def register(ctx):
     return register_plugin(ctx, __name__, skills=SKILLS)
 ```
+
+For runtime-gated surfaces, pass only the active decorated declarations instead
+of exposing a module full of inactive ones:
+
+```python
+def register(ctx):
+    active = [inject_context]
+    if authored_memory_enabled(ctx):
+        active.append(workspace_write_entry)
+    return register_plugin(
+        ctx,
+        active,
+        skills=SKILLS,
+        plugin_name="memory-sync",
+        logger=logger,
+    )
+```
+
+The second argument may be a module, a loaded module name, or an iterable of
+decorated callables. Explicit `plugin_name` and `logger` values control the
+single registration receipt; module registration keeps the existing manifest
+and module-derived defaults. Duplicate detection and returned
+`RegistrationSummary` inventories are identical for both declaration forms.
 
 `@command` requires a bare lowercase kebab-case name. Slash commands are the
 backward-compatible default: the handler receives trailing command text
@@ -281,8 +338,10 @@ visible in container logs without forcing verbose plugin logging everywhere.
 `log_registration_summary(logger, plugin_name, summary)` helper. The receipt
 uses the Hermes manifest name when available and lists the actual registered
 command, tool, middleware, hook, and skill names, plus skipped optional skills.
-Consumers with a custom registration path can call the same helper with their
-own `RegistrationSummary` instead of inventing a second receipt format.
+Runtime-gated consumers should pass their active decorated declarations to
+`register_plugin`; a truly custom registration path can call the same helper
+with its own `RegistrationSummary` instead of inventing a second receipt
+format.
 
 ## Tool names
 

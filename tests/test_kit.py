@@ -163,6 +163,126 @@ class SchemaConventionTests(unittest.TestCase):
 
 
 class HandlerBehaviorTests(unittest.TestCase):
+    def test_prebuilt_schema_is_copied_and_legacy_required_validation_can_be_disabled(self) -> None:
+        source_schema = {
+            "description": "Write a legacy memory entry.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Entry body.",
+                    }
+                },
+                "required": ["content"],
+                "additionalProperties": False,
+            },
+        }
+
+        @hpk.tool(
+            toolset="x",
+            name="legacy_write_entry",
+            schema=source_schema,
+            validate_required=False,
+        )
+        def legacy(args, **kwargs):
+            """Write through a handler with its own validation contract."""
+            if not args.get("content"):
+                return '{"success": false, "error": "legacy content error"}'
+            return {"content": args["content"]}
+
+        emitted = getattr(legacy, "_hpk_tool_spec")["schema"]
+        source_schema["parameters"]["properties"]["content"]["description"] = "mutated"
+
+        self.assertEqual(
+            emitted["parameters"]["properties"]["content"]["description"],
+            "Entry body.",
+        )
+        self.assertNotIn("name", emitted)
+        self.assertEqual(emitted["parameters"]["required"], ["content"])
+        self.assertEqual(
+            json.loads(legacy({})),
+            {"success": False, "error": "legacy content error"},
+        )
+
+    def test_prebuilt_schema_uses_required_validation_by_default(self) -> None:
+        handler = Mock(return_value={"unexpected": True})
+
+        decorated = hpk.tool(
+            toolset="x",
+            name="schema_validated_tool",
+            schema={
+                "description": "Validate a supplied schema.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                    "additionalProperties": False,
+                },
+            },
+        )(handler)
+
+        result = json.loads(decorated({}))
+
+        self.assertFalse(result["success"])
+        self.assertIn("query is required", result["error"])
+        handler.assert_not_called()
+
+    def test_prebuilt_schema_and_params_are_mutually_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "schema and params"):
+
+            @hpk.tool(
+                toolset="x",
+                params={"query": hpk.str_arg("Query.")},
+                schema={
+                    "description": "Invalid mixed declaration.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                    },
+                },
+            )
+            def mixed(args, **kwargs):
+                """Invalid mixed declaration."""
+                return {}
+
+    def test_prebuilt_schema_rejects_invalid_hermes_shapes(self) -> None:
+        invalid_schemas = (
+            {
+                "description": "Arguments are incorrectly flattened.",
+                "type": "object",
+                "properties": {},
+            },
+            {
+                "description": "Required references an unknown property.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": ["missing"],
+                },
+            },
+            {
+                "name": "different_name",
+                "description": "Name disagrees with the decorated tool.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        )
+
+        for supplied in invalid_schemas:
+            with self.subTest(schema=supplied), self.assertRaises(ValueError):
+
+                @hpk.tool(
+                    toolset="x",
+                    name="schema_shape_probe",
+                    schema=supplied,
+                )
+                def invalid(args, **kwargs):
+                    """Invalid prebuilt schema."""
+                    return {}
+
     def test_success_envelope_and_tolerates_runtime_kwargs(self) -> None:
         with self.assertLogs(level="DEBUG") as cap:
             out = json.loads(sample_read({"thread_id_or_url": "999"}, task_id="t", session_id="s"))
@@ -1252,6 +1372,50 @@ class RegisterPluginTests(unittest.TestCase):
             "sample-plugin",
             summary,
         )
+
+    def test_registers_only_active_decorated_callables_from_iterable(self) -> None:
+        @hpk.tool(toolset="sample", name="sample_active")
+        def active_tool(args, **kwargs):
+            """Active tool."""
+            return {}
+
+        @hpk.tool(toolset="sample", name="sample_inactive")
+        def inactive_tool(args, **kwargs):
+            """Inactive tool."""
+            return {}
+
+        @hpk.hook("pre_llm_call")
+        def active_hook(**kwargs):
+            return kwargs
+
+        ctx = FakePluginCtx()
+        logger = logging.getLogger("active-declarations-test")
+        with patch.object(hpk, "log_registration_summary") as log_summary:
+            summary = hpk.register_plugin(
+                ctx,
+                (active_hook, active_tool),
+                plugin_name="active-plugin",
+                logger=logger,
+            )
+
+        self.assertEqual(summary.tools, ("sample_active",))
+        self.assertEqual(summary.hooks, ("pre_llm_call",))
+        self.assertNotIn("sample_inactive", summary.tools)
+        log_summary.assert_called_once_with(logger, "active-plugin", summary)
+
+    def test_iterable_duplicate_detection_matches_module_registration(self) -> None:
+        @hpk.tool(toolset="sample", name="sample_duplicate_iterable")
+        def first(args, **kwargs):
+            """First duplicate tool."""
+            return {}
+
+        @hpk.tool(toolset="sample", name="sample_duplicate_iterable")
+        def second(args, **kwargs):
+            """Second duplicate tool."""
+            return {}
+
+        with self.assertRaisesRegex(ValueError, "duplicate tool"):
+            hpk.register_plugin(FakePluginCtx(), (second, first))
 
     def test_missing_optional_skill_is_skipped_with_warning(self) -> None:
         ctx = FakePluginCtx()
