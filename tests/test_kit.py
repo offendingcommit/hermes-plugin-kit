@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import sys
 import tempfile
 import types
@@ -40,6 +41,67 @@ class FakePluginCtx(FakeCtx):
 
     def register_skill(self, **kwargs) -> None:
         self.skills.append(kwargs)
+
+
+class RuntimeCompatibilityTests(unittest.TestCase):
+    def test_manifest_config_remains_compatible_without_loading_host_config(self) -> None:
+        ctx = types.SimpleNamespace(
+            manifest=types.SimpleNamespace(config={"mode": "community"})
+        )
+        loader = Mock(side_effect=AssertionError("loader should not run"))
+
+        result = hpk.load_plugin_config(
+            ctx,
+            "memory-sync",
+            config_loader=loader,
+        )
+
+        self.assertEqual(result, {"mode": "community"})
+        loader.assert_not_called()
+
+    def test_real_plugin_context_reads_named_effective_config(self) -> None:
+        ctx = types.SimpleNamespace(manifest=types.SimpleNamespace())
+        effective = {
+            "plugins": {
+                "enabled": ["memory-sync"],
+                "memory-sync": {"authored_memory": {"enabled": True}},
+            }
+        }
+
+        result = hpk.load_plugin_config(
+            ctx,
+            "memory-sync",
+            config_loader=lambda: effective,
+        )
+
+        self.assertEqual(result, {"authored_memory": {"enabled": True}})
+        self.assertIsNot(result, effective["plugins"]["memory-sync"])
+
+    def test_stderr_logging_is_operator_gated_and_idempotent(self) -> None:
+        logger = logging.getLogger("hpk-runtime-compatibility-test")
+        logger.handlers.clear()
+        logger.setLevel(logging.NOTSET)
+        try:
+            with patch.dict(
+                hpk.os.environ,
+                {"MEMORY_SYNC_LOG_STDERR": "true"},
+                clear=False,
+            ):
+                first = hpk.configure_stderr_logging(
+                    logger,
+                    env_var="MEMORY_SYNC_LOG_STDERR",
+                )
+                second = hpk.configure_stderr_logging(
+                    logger,
+                    env_var="MEMORY_SYNC_LOG_STDERR",
+                )
+
+            self.assertIsNotNone(first)
+            self.assertIs(first, second)
+            self.assertEqual(logger.handlers, [first])
+            self.assertEqual(logger.level, logging.INFO)
+        finally:
+            logger.handlers.clear()
 
 
 @hpk.tool(

@@ -54,6 +54,7 @@ import importlib
 import inspect
 import json
 import logging
+import os
 import re
 import sys
 import threading
@@ -82,6 +83,8 @@ __all__ = [
     "MiddlewareKind",
     "PluginSkill",
     "RegistrationSummary",
+    "load_plugin_config",
+    "configure_stderr_logging",
     "register_all",
     "build_schema",
     "tool_name",
@@ -148,6 +151,83 @@ class MiddlewareKind(str, Enum):
     TOOL_EXECUTION = "tool_execution"
     LLM_REQUEST = "llm_request"
     LLM_EXECUTION = "llm_execution"
+
+
+def load_plugin_config(
+    ctx: Any,
+    plugin_name: str,
+    *,
+    config_loader: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return one plugin's effective Hermes config without mutating host state.
+
+    Current Hermes ``PluginManifest`` objects do not carry runtime profile
+    configuration. ``manifest.config`` remains a compatibility seam for tests
+    and older hosts; otherwise this reads ``plugins.<plugin_name>`` through
+    Hermes' read-only effective config loader. A shallow copy prevents plugin
+    code from mutating the host config cache.
+    """
+    clean_name = str(plugin_name or "").strip()
+    if not clean_name:
+        raise ValueError("plugin_name must be a non-empty string")
+    manifest = getattr(ctx, "manifest", None)
+    manifest_config = getattr(manifest, "config", None)
+    if isinstance(manifest_config, dict) and manifest_config:
+        return dict(manifest_config)
+    if config_loader is None:
+        try:
+            from hermes_cli.config import load_config_readonly
+        except (ImportError, AttributeError):
+            return {}
+        config_loader = load_config_readonly
+    try:
+        effective = config_loader()
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "hermes_plugin_kit: effective config read failed for %s: %s",
+            clean_name,
+            exc,
+        )
+        return {}
+    plugins = effective.get("plugins") if isinstance(effective, dict) else None
+    plugin_config = plugins.get(clean_name) if isinstance(plugins, dict) else None
+    return dict(plugin_config) if isinstance(plugin_config, dict) else {}
+
+
+def configure_stderr_logging(
+    logger: logging.Logger,
+    *,
+    env_var: str,
+    default: bool = False,
+) -> logging.Handler | None:
+    """Enable one idempotent INFO stderr handler from an operator env flag."""
+    if not isinstance(logger, logging.Logger):
+        raise TypeError("logger must be a logging.Logger")
+    clean_env_var = str(env_var or "").strip()
+    if not clean_env_var:
+        raise ValueError("env_var must be a non-empty string")
+    raw = os.environ.get(clean_env_var)
+    enabled = default if raw is None else raw.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not enabled:
+        return None
+    for handler in logger.handlers:
+        if getattr(handler, "_hpk_stderr_env_var", None) == clean_env_var:
+            return handler
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    handler._hpk_stderr_env_var = clean_env_var  # type: ignore[attr-defined]
+    logger.addHandler(handler)
+    if logger.level == logging.NOTSET or logger.level > logging.INFO:
+        logger.setLevel(logging.INFO)
+    return handler
 
 
 class MediaType(str, Enum):
