@@ -64,7 +64,7 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 __all__ = [
     "tool",
@@ -492,6 +492,48 @@ def build_schema(name: str, description: str, params: dict | None) -> dict:
         "description": _augment_description(description, required, examples),
         "parameters": parameters,
     }
+
+
+def _copy_and_validate_schema(
+    name: str,
+    description: str,
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    """Return an isolated, convention-valid Hermes function schema."""
+    if not isinstance(schema, dict):
+        raise TypeError("schema must be a dict")
+    copied = copy.deepcopy(schema)
+    if "properties" in copied:
+        raise ValueError(
+            "schema arguments must live under schema['parameters'], "
+            "not top-level properties"
+        )
+    schema_name = copied.get("name")
+    if schema_name is not None and schema_name != name:
+        raise ValueError(
+            f"schema name {schema_name!r} does not match tool name {name!r}"
+        )
+    parameters = copied.get("parameters")
+    if not isinstance(parameters, dict):
+        raise ValueError("schema.parameters must be an object-shaped dict")
+    if parameters.get("type") != "object":
+        raise ValueError("schema.parameters.type must be 'object'")
+    properties = parameters.get("properties")
+    if not isinstance(properties, dict):
+        raise ValueError("schema.parameters.properties must be a dict")
+    required = parameters.get("required", [])
+    if not isinstance(required, list) or any(
+        not isinstance(item, str) for item in required
+    ):
+        raise ValueError("schema.parameters.required must be a list of strings")
+    unknown_required = sorted(set(required).difference(properties))
+    if unknown_required:
+        raise ValueError(
+            "schema.parameters.required references unknown properties: "
+            + ", ".join(unknown_required)
+        )
+    copied["description"] = description
+    return copied
 
 
 # ---------------------------------------------------------------------------
@@ -1359,6 +1401,8 @@ def tool(
     *,
     toolset: str,
     params: dict | None = None,
+    schema: dict | None = None,
+    validate_required: bool = True,
     name: str | None = None,
     namespace: str | None = None,
     description: str | None = None,
@@ -1370,21 +1414,37 @@ def tool(
     The wrapped handler receives ``(args, **kwargs)`` and returns a ``dict``
     (becomes the success ``data``) or raises (becomes a tool error). It may also
     return a ``str`` as an escape hatch (treated as already-encoded JSON).
+    Supply either kit ``params`` or an existing Hermes function ``schema``.
+    ``validate_required=False`` leaves required-field errors to the handler
+    without removing those fields from the model-facing schema.
     """
+    if params is not None and schema is not None:
+        raise ValueError("schema and params are mutually exclusive")
+    if not isinstance(validate_required, bool):
+        raise TypeError("validate_required must be a bool")
 
     def decorate(fn: Callable) -> Callable:
         tool_name = validate_tool_name(name or fn.__name__, namespace=namespace)
-        doc = (description or inspect.getdoc(fn) or "").strip()
+        schema_description = schema.get("description") if isinstance(schema, dict) else None
+        doc = (description or schema_description or inspect.getdoc(fn) or "").strip()
         if not doc:
             raise ValueError(
                 f"@tool {tool_name!r}: a description is required (docstring or description=)."
             )
-        schema = build_schema(tool_name, doc, params)
-        required = list(schema["parameters"].get("required", []))
-        examples = {
-            key: (params or {}).get(key, {}).get("_example")
-            for key in required
-        }
+        emitted_schema = (
+            _copy_and_validate_schema(tool_name, doc, schema)
+            if schema is not None
+            else build_schema(tool_name, doc, params)
+        )
+        required = list(emitted_schema["parameters"].get("required", []))
+        examples = (
+            {
+                key: (params or {}).get(key, {}).get("_example")
+                for key in required
+            }
+            if schema is None
+            else {}
+        )
         log = logging.getLogger(fn.__module__ or "hermes_plugin_kit")
 
         @functools.wraps(fn)
@@ -1399,21 +1459,25 @@ def tool(
                 safe_args,
                 _truncate(context),
             )
-            for key in required:
-                value = args.get(key)
-                if value is None or (isinstance(value, str) and not value.strip()):
-                    example = examples.get(key)
-                    message = f"{key} is required" + (
-                        f" (e.g. {example!r})" if example is not None else ""
-                    )
-                    log.warning(
-                        "%s: rejected call, missing %s; elapsed_ms=%.2f; args=%s",
-                        tool_name,
-                        key,
-                        (time.perf_counter() - started) * 1000,
-                        safe_args,
-                    )
-                    return json.dumps({"success": False, "error": message}, ensure_ascii=False)
+            if validate_required:
+                for key in required:
+                    value = args.get(key)
+                    if value is None or (isinstance(value, str) and not value.strip()):
+                        example = examples.get(key)
+                        message = f"{key} is required" + (
+                            f" (e.g. {example!r})" if example is not None else ""
+                        )
+                        log.warning(
+                            "%s: rejected call, missing %s; elapsed_ms=%.2f; args=%s",
+                            tool_name,
+                            key,
+                            (time.perf_counter() - started) * 1000,
+                            safe_args,
+                        )
+                        return json.dumps(
+                            {"success": False, "error": message},
+                            ensure_ascii=False,
+                        )
             try:
                 result = fn(args, **kwargs)
             except Exception as exc:  # noqa: BLE001 — tool errors stay in-band
@@ -1448,7 +1512,7 @@ def tool(
             {
                 "name": tool_name,
                 "toolset": toolset,
-                "schema": schema,
+                "schema": emitted_schema,
                 "requires_env": requires_env,
                 "emoji": emoji,
             },
@@ -1503,25 +1567,77 @@ def _register_tool(ctx: Any, handler: Callable, spec: dict[str, Any]) -> None:
 
 def register_plugin(
     ctx: Any,
-    module: Any,
+    module: Any | Iterable[Callable],
     skills: tuple[PluginSkill, ...] | list[PluginSkill] = (),
+    *,
+    plugin_name: str | None = None,
+    logger: logging.Logger | None = None,
 ) -> RegistrationSummary:
     """Register decorated slash/CLI commands, tools, middleware, hooks, and skills.
 
     Unlike the backward-compatible :func:`register_all`, this lifecycle-level
     entrypoint rejects distinct declarations that share a public name. Missing
     optional skills are warned and skipped; missing required skills fail fast.
+    Pass a module (or loaded module name) to discover all declarations, or an
+    iterable of decorated callables to register only a runtime-active subset.
     """
     if isinstance(module, str):
         module = sys.modules[module]
-    log = logging.getLogger(getattr(module, "__name__", "hermes_plugin_kit"))
+    if inspect.ismodule(module):
+        declarations = tuple(obj for _, obj in inspect.getmembers(module))
+        declaration_module_name = getattr(module, "__name__", None)
+    else:
+        try:
+            declarations = tuple(module)
+        except TypeError as exc:
+            raise TypeError(
+                "module must be a module, module name, or iterable of decorated callables"
+            ) from exc
+        for declaration in declarations:
+            if not callable(declaration) or not any(
+                getattr(declaration, attr, None)
+                for attr in (
+                    _COMMAND_SPEC_ATTR,
+                    _SPEC_ATTR,
+                    _MIDDLEWARE_SPEC_ATTR,
+                    _HOOK_SPEC_ATTR,
+                )
+            ):
+                raise TypeError(
+                    "declaration iterables must contain only decorated callables"
+                )
+        declaration_module_name = next(
+            (
+                getattr(declaration, "__module__", None)
+                for declaration in declarations
+                if getattr(declaration, "__module__", None)
+            ),
+            None,
+        )
+    if logger is not None and not isinstance(logger, logging.Logger):
+        raise TypeError("logger must be a logging.Logger")
+    log = logger or logging.getLogger(
+        declaration_module_name or "hermes_plugin_kit"
+    )
+    resolved_plugin_name = (
+        plugin_name
+        if plugin_name is not None
+        else (
+            getattr(getattr(ctx, "manifest", None), "name", None)
+            or declaration_module_name
+            or "hermes_plugin_kit"
+        )
+    )
+    if not isinstance(resolved_plugin_name, str) or not resolved_plugin_name.strip():
+        raise ValueError("plugin_name must be a non-empty string")
+    resolved_plugin_name = resolved_plugin_name.strip()
 
     slash_commands: dict[str, Callable] = {}
     cli_commands: dict[str, Callable] = {}
     tools: dict[str, Callable] = {}
     middlewares: dict[str, Callable] = {}
     hooks: dict[str, Callable] = {}
-    for _, obj in inspect.getmembers(module):
+    for obj in declarations:
         command_spec = getattr(obj, _COMMAND_SPEC_ATTR, None)
         if command_spec:
             raw_command_type = command_spec.get("type", CommandType.SLASH.value)
@@ -1651,10 +1767,5 @@ def register_plugin(
         skills=tuple(registered_skills),
         skipped_optional_skills=tuple(skipped_skills),
     )
-    plugin_name = (
-        getattr(getattr(ctx, "manifest", None), "name", None)
-        or getattr(module, "__name__", None)
-        or "hermes_plugin_kit"
-    )
-    log_registration_summary(log, plugin_name, summary)
+    log_registration_summary(log, resolved_plugin_name, summary)
     return summary

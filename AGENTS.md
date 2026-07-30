@@ -20,6 +20,15 @@ plugin.
   `log_registration_summary`; preserve its stable field order and actual
   command, tool, middleware, hook, skill, and skipped optional skill names.
   `register_plugin` must emit exactly one receipt through that helper.
+- Use `@tool(schema=...)` when a consumer already owns a valid Hermes function
+  schema; do not translate it through a second argument-spec format. Keep
+  `schema` and `params` exclusive, deep-copy supplied schemas, and preserve
+  schema-required fields even when `validate_required=False` delegates
+  missing-argument errors to a legacy handler.
+- Runtime-gated consumers should pass their active decorated callables to
+  `register_plugin` with an explicit receipt identity. Iterable registration
+  must retain module registration's duplicate checks, deterministic ordering,
+  skills, and `RegistrationSummary` contract.
 - Use `invoke_host_tool` for host-managed capabilities such as `send_message`;
   do not assume every Hermes capability is registered in `tools.registry`.
   Nested host calls must remain visible to `pre_tool_call` and `post_tool_call`.
