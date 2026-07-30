@@ -1055,6 +1055,44 @@ class RegisterPluginTests(unittest.TestCase):
         self.assertIn("hooks=pre_llm_call", "\n".join(cap.output))
         self.assertIn("skills=temporal-awareness", "\n".join(cap.output))
 
+    def test_logs_one_stable_registration_receipt_with_actual_names(self) -> None:
+        logger = logging.getLogger("registration-receipt-test")
+        summary = hpk.RegistrationSummary(
+            commands=("valdris-status",),
+            tools=("sample_read_thread",),
+            middlewares=("tool_request",),
+            hooks=("pre_llm_call",),
+            skills=("temporal-awareness",),
+            skipped_optional_skills=("missing-optional",),
+        )
+
+        with self.assertLogs(logger, level="INFO") as cap:
+            hpk.log_registration_summary(logger, "sample-plugin", summary)
+
+        self.assertEqual(len(cap.records), 1)
+        self.assertEqual(
+            cap.records[0].getMessage(),
+            "hermes_plugin_kit: registered plugin lifecycle; "
+            "plugin=sample-plugin; commands=valdris-status; "
+            "tools=sample_read_thread; middlewares=tool_request; "
+            "hooks=pre_llm_call; skills=temporal-awareness; "
+            "skipped_optional_skills=missing-optional",
+        )
+
+    def test_register_plugin_uses_public_registration_summary_logger(self) -> None:
+        ctx = FakePluginCtx()
+        ctx.manifest = types.SimpleNamespace(name="sample-plugin")
+        module = self._module()
+
+        with patch.object(hpk, "log_registration_summary") as log_summary:
+            summary = hpk.register_plugin(ctx, module)
+
+        log_summary.assert_called_once_with(
+            logging.getLogger("sample_plugin"),
+            "sample-plugin",
+            summary,
+        )
+
     def test_missing_optional_skill_is_skipped_with_warning(self) -> None:
         ctx = FakePluginCtx()
         skill = hpk.plugin_skill("optional", "/missing/SKILL.md", "Optional", optional=True)
