@@ -227,6 +227,33 @@ reported in the returned `RegistrationSummary`. Hermes supplies the plugin
 namespace, so a declared `temporal-awareness` skill from plugin
 `temporal-awareness` resolves as `temporal-awareness:temporal-awareness`.
 
+## Runtime configuration and registration receipts
+
+Real Hermes `PluginManifest` objects do not carry profile runtime config. Use
+the kit compatibility seam instead of reading `ctx.manifest.config` directly:
+
+```python
+import logging
+
+from hermes_plugin_kit import configure_stderr_logging, load_plugin_config
+
+logger = logging.getLogger("memory-sync")
+
+def register(ctx):
+    configure_stderr_logging(logger, env_var="MEMORY_SYNC_LOG_STDERR")
+    config = load_plugin_config(ctx, "memory-sync")
+    # Register the lifecycle-gated surface from config.
+```
+
+`load_plugin_config` accepts a non-empty `manifest.config` for tests and older
+hosts. On current Hermes it reads `plugins.<name>` through
+`load_config_readonly()` and returns a deep copy so plugin code cannot mutate
+Hermes' cached configuration through nested values.
+
+`configure_stderr_logging` installs one idempotent INFO handler only when its
+operator-owned environment flag is enabled. This makes registration receipts
+visible in container logs without forcing verbose plugin logging everywhere.
+
 ## Tool names
 
 Hermes uses one global tool registry, and the agent loop intercepts core names

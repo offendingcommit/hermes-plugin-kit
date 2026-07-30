@@ -10,6 +10,10 @@ plugin.
 - Keep `@tool` and `register_all` backward compatible. Use `@command`,
   `@middleware`, `@hook`, `plugin_skill`, and `register_plugin` for full plugin
   lifecycle registration.
+- Use `load_plugin_config` for effective `plugins.<name>` runtime settings;
+  current Hermes `PluginManifest` objects do not expose profile config. Use
+  `configure_stderr_logging` for operator-gated registration receipts instead
+  of rebuilding per-plugin stderr handlers.
 - Use `invoke_host_tool` for host-managed capabilities such as `send_message`;
   do not assume every Hermes capability is registered in `tools.registry`.
   Nested host calls must remain visible to `pre_tool_call` and `post_tool_call`.
