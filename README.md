@@ -87,13 +87,15 @@ uv add git+https://github.com/offendingcommit/hermes-plugin-kit.git
 pip install git+https://github.com/offendingcommit/hermes-plugin-kit.git
 ```
 
-With uv, pin it as a source in your plugin's `pyproject.toml`:
+With uv, pin it to an immutable commit in your plugin's `pyproject.toml`.
+Profiles that load several plugins into one Python environment must keep every
+plugin on the same kit revision:
 
 ```toml
 dependencies = ["hermes-plugin-kit"]
 
 [tool.uv.sources]
-hermes-plugin-kit = { git = "https://github.com/offendingcommit/hermes-plugin-kit.git", branch = "main" }
+hermes-plugin-kit = { git = "https://github.com/offendingcommit/hermes-plugin-kit.git", rev = "<commit-sha>" }
 ```
 
 ## Usage
