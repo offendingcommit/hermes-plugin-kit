@@ -6,11 +6,12 @@
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 `hermes-plugin-kit` is a tiny, dependency-free helper for authoring plugins for
-[hermes-agent](https://github.com/NousResearch/hermes-agent). Decorate a slash
-command with `@command`, a tool with `@tool`, or a lifecycle callback with
-`@middleware` or `@hook`, then use `register_plugin` to register commands,
-tools, middleware, hooks, and plugin-owned skills together. Existing tool-only
-plugins can keep using `register_all`; the LLM-facing schema,
+[hermes-agent](https://github.com/NousResearch/hermes-agent). Decorate an
+in-session slash command or terminal CLI subcommand with `@command`, a tool
+with `@tool`, or a lifecycle callback with `@middleware` or `@hook`, then use
+`register_plugin` to register commands, tools, middleware, hooks, and
+plugin-owned skills together. Existing tool-only plugins can keep using
+`register_all`; the LLM-facing schema,
 argument validation, structured logging, and the JSON result envelope are all
 generated for you — correctly, every time.
 
@@ -140,6 +141,7 @@ Use the lifecycle entrypoint when a plugin provides more than tools:
 import time
 from pathlib import Path
 from hermes_plugin_kit import (
+    CommandType,
     MiddlewareKind,
     command,
     hook,
@@ -152,6 +154,19 @@ from hermes_plugin_kit import (
 def valdris_status(raw_args):
     """Show the current Valdris plugin status."""
     return build_status(raw_args)
+
+def configure_valdris_cli(parser):
+    parser.add_argument("--scope", default="all")
+
+@command(
+    "valdris",
+    type=CommandType.CLI,
+    help="Manage Valdris",
+    setup_fn=configure_valdris_cli,
+)
+def valdris_cli(args):
+    """Manage Valdris from the terminal."""
+    return run_valdris_cli(scope=args.scope)
 
 @middleware(MiddlewareKind.TOOL_REQUEST)
 def normalize_tool_request(**kwargs):
@@ -187,12 +202,21 @@ def register(ctx):
     return register_plugin(ctx, __name__, skills=SKILLS)
 ```
 
-`@command` requires a bare lowercase kebab-case name without the leading slash.
-Its handler receives the trailing command text unchanged and may return
-`str | None` synchronously or asynchronously. The optional `args_hint` is
-forwarded to Hermes for native command pickers. Command logs include only the
-command name, elapsed time, result type, and argument character count, never
-the raw arguments.
+`@command` requires a bare lowercase kebab-case name. Slash commands are the
+backward-compatible default: the handler receives trailing command text
+unchanged and may return `str | None` synchronously or asynchronously. The
+optional `args_hint` is forwarded to Hermes for native command pickers.
+
+Use `type=CommandType.CLI` (or `type="cli"`) for a terminal command such as
+`hermes valdris`. Its synchronous handler receives the parsed
+`argparse.Namespace`. `setup_fn` configures that command's argparse subparser;
+omit it for a command with no command-specific arguments. `help` defaults to
+the first line of the resolved description. CLI commands cannot use
+`args_hint`, and slash commands cannot use `help` or `setup_fn`.
+
+Command logs include only the command name, elapsed time, result type, and,
+for slash commands, the argument character count. Raw slash text and parsed
+CLI argument values are never logged.
 
 `@middleware` changes runtime behavior rather than merely observing it. Request
 middleware rewrites the effective payload before Hermes continues; execution

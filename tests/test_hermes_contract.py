@@ -17,6 +17,7 @@ and set it); locally it discovers ``~/hermes-agent`` automatically.
 
 from __future__ import annotations
 
+import argparse
 import inspect
 import json
 import os
@@ -223,8 +224,9 @@ class HermesContractTests(unittest.TestCase):
             self.assertEqual(summary.hooks, ("pre_llm_call",))
             self.assertEqual(len(cap.records), 1)
             self.assertIn(
-                "plugin=contract-plugin; commands=<none>; tools=<none>; "
-                "middlewares=<none>; hooks=pre_llm_call; skills=probe; "
+                "plugin=contract-plugin; commands=<none>; "
+                "cli_commands=<none>; tools=<none>; middlewares=<none>; "
+                "hooks=pre_llm_call; skills=probe; "
                 "skipped_optional_skills=<none>",
                 cap.records[0].getMessage(),
             )
@@ -252,6 +254,35 @@ class HermesContractTests(unittest.TestCase):
             _REAL.resolve_plugin_command_result(result),
             "command:exact raw args",
         )
+
+    def test_cli_command_registers_and_dispatches_through_real_plugin_context(self) -> None:
+        def setup_parser(parser):
+            parser.add_argument("--scope", required=True)
+
+        @hpk.command(
+            "hpk-contract",
+            type=hpk.CommandType.CLI,
+            help="Run the plugin-kit contract probe",
+            description="Exercise terminal CLI command registration.",
+            setup_fn=setup_parser,
+        )
+        def cli_handler(args):
+            return f"cli:{args.scope}"
+
+        manager = _REAL.PluginManager()
+        manifest = _REAL.PluginManifest(name="contract-plugin")
+        ctx = _REAL.PluginContext(manifest, manager)
+        module = types.ModuleType("contract_cli_command_plugin")
+        module.cli_handler = cli_handler
+
+        summary = hpk.register_plugin(ctx, module)
+
+        self.assertEqual(summary.cli_commands, ("hpk-contract",))
+        entry = manager._cli_commands["hpk-contract"]
+        parser = argparse.ArgumentParser()
+        entry["setup_fn"](parser)
+        args = parser.parse_args(["--scope", "exact"])
+        self.assertEqual(entry["handler_fn"](args), "cli:exact")
 
     def test_middleware_registers_and_runs_all_real_hermes_contracts(self) -> None:
         request_calls: list[tuple[str, dict]] = []
@@ -378,6 +409,16 @@ class HermesContractTests(unittest.TestCase):
             handler=lambda raw_args: raw_args,
             description="Probe command.",
             args_hint="<value>",
+        )
+
+        cli_command_sig = inspect.signature(_REAL.PluginContext.register_cli_command)
+        cli_command_sig.bind(
+            None,
+            name="probe",
+            help="Run the probe",
+            setup_fn=lambda parser: None,
+            handler_fn=lambda args: args,
+            description="Probe terminal command.",
         )
 
         hook_sig = inspect.signature(_REAL.PluginContext.register_hook)
