@@ -214,12 +214,20 @@ class HermesContractTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "SKILL.md"
             path.write_text("# Contract skill\n")
-            summary = hpk.register_plugin(
-                ctx,
-                module,
-                skills=(hpk.plugin_skill("probe", path, "Contract probe"),),
-            )
+            with self.assertLogs("contract_lifecycle_plugin", level="INFO") as cap:
+                summary = hpk.register_plugin(
+                    ctx,
+                    module,
+                    skills=(hpk.plugin_skill("probe", path, "Contract probe"),),
+                )
             self.assertEqual(summary.hooks, ("pre_llm_call",))
+            self.assertEqual(len(cap.records), 1)
+            self.assertIn(
+                "plugin=contract-plugin; commands=<none>; tools=<none>; "
+                "middlewares=<none>; hooks=pre_llm_call; skills=probe; "
+                "skipped_optional_skills=<none>",
+                cap.records[0].getMessage(),
+            )
             self.assertEqual(
                 manager.invoke_hook("pre_llm_call", message="gateway-shaped"),
                 [{"context": "gateway-shaped"}],
