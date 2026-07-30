@@ -16,6 +16,10 @@ plugin.
   current Hermes `PluginManifest` objects do not expose profile config. Use
   `configure_stderr_logging` for operator-gated registration receipts instead
   of rebuilding per-plugin stderr handlers.
+- Keep lifecycle registration receipts centralized in
+  `log_registration_summary`; preserve its stable field order and actual
+  command, tool, middleware, hook, skill, and skipped optional skill names.
+  `register_plugin` must emit exactly one receipt through that helper.
 - Use `invoke_host_tool` for host-managed capabilities such as `send_message`;
   do not assume every Hermes capability is registered in `tools.registry`.
   Nested host calls must remain visible to `pre_tool_call` and `post_tool_call`.

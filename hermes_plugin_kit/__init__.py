@@ -73,6 +73,7 @@ __all__ = [
     "hook",
     "plugin_skill",
     "register_plugin",
+    "log_registration_summary",
     "invoke_host_tool",
     "deliver_media",
     "resolve_delivery_target",
@@ -153,6 +154,32 @@ class CommandType(str, Enum):
 
     SLASH = "slash"
     CLI = "cli"
+
+
+def log_registration_summary(
+    logger: logging.Logger,
+    plugin_name: str,
+    summary: RegistrationSummary,
+) -> None:
+    """Emit one stable INFO receipt for a completed lifecycle registration."""
+    clean_plugin_name = str(plugin_name or "").strip()
+    if not clean_plugin_name:
+        raise ValueError("plugin_name must be a non-empty string")
+    if not isinstance(summary, RegistrationSummary):
+        raise TypeError("summary must be a RegistrationSummary")
+    logger.info(
+        "hermes_plugin_kit: registered plugin lifecycle; plugin=%s; "
+        "commands=%s; cli_commands=%s; tools=%s; middlewares=%s; hooks=%s; "
+        "skills=%s; skipped_optional_skills=%s",
+        clean_plugin_name,
+        ",".join(summary.commands) or "<none>",
+        ",".join(summary.cli_commands) or "<none>",
+        ",".join(summary.tools) or "<none>",
+        ",".join(summary.middlewares) or "<none>",
+        ",".join(summary.hooks) or "<none>",
+        ",".join(summary.skills) or "<none>",
+        ",".join(summary.skipped_optional_skills) or "<none>",
+    )
 
 
 class MiddlewareKind(str, Enum):
@@ -1624,16 +1651,10 @@ def register_plugin(
         skills=tuple(registered_skills),
         skipped_optional_skills=tuple(skipped_skills),
     )
-    log.info(
-        "hermes_plugin_kit: registered plugin lifecycle; commands=%s; "
-        "cli_commands=%s; tools=%s; middlewares=%s; hooks=%s; skills=%s; "
-        "skipped_optional_skills=%s",
-        ",".join(summary.commands) or "<none>",
-        ",".join(summary.cli_commands) or "<none>",
-        ",".join(summary.tools) or "<none>",
-        ",".join(summary.middlewares) or "<none>",
-        ",".join(summary.hooks) or "<none>",
-        ",".join(summary.skills) or "<none>",
-        ",".join(summary.skipped_optional_skills) or "<none>",
+    plugin_name = (
+        getattr(getattr(ctx, "manifest", None), "name", None)
+        or getattr(module, "__name__", None)
+        or "hermes_plugin_kit"
     )
+    log_registration_summary(log, plugin_name, summary)
     return summary

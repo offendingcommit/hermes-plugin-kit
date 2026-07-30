@@ -277,6 +277,12 @@ Hermes' cached configuration through nested values.
 `configure_stderr_logging` installs one idempotent INFO handler only when its
 operator-owned environment flag is enabled. This makes registration receipts
 visible in container logs without forcing verbose plugin logging everywhere.
+`register_plugin` emits exactly one stable INFO receipt through the public
+`log_registration_summary(logger, plugin_name, summary)` helper. The receipt
+uses the Hermes manifest name when available and lists the actual registered
+command, tool, middleware, hook, and skill names, plus skipped optional skills.
+Consumers with a custom registration path can call the same helper with their
+own `RegistrationSummary` instead of inventing a second receipt format.
 
 ## Tool names
 
@@ -408,6 +414,9 @@ include:
 - `INFO`: successful completion with `elapsed_ms` and whether the handler returned
   a dictionary-like result or an already-encoded string.
 - `INFO`: a registration summary from `register_all`, including count and names.
+- `INFO`: one stable lifecycle receipt from `register_plugin`, including the
+  plugin name and actual command, tool, middleware, hook, skill, and skipped
+  optional skill names.
 
 The kit never logs handler result payloads. Keys containing `token`, `secret`,
 `password`, `passwd`, `api_key`, `apikey`, or `auth` are replaced with `***` at
