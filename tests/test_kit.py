@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import inspect
 import json
@@ -26,12 +27,16 @@ class FakePluginCtx(FakeCtx):
     def __init__(self) -> None:
         super().__init__()
         self.commands: list[dict] = []
+        self.cli_commands: list[dict] = []
         self.middlewares: list[tuple[str, object]] = []
         self.hooks: list[tuple[str, object]] = []
         self.skills: list[dict] = []
 
     def register_command(self, **kwargs) -> None:
         self.commands.append(kwargs)
+
+    def register_cli_command(self, **kwargs) -> None:
+        self.cli_commands.append(kwargs)
 
     def register_middleware(self, kind, callback) -> None:
         self.middlewares.append((kind, callback))
@@ -477,6 +482,119 @@ class CommandBehaviorTests(unittest.IsolatedAsyncioTestCase):
             hpk.command("valdris-help", description=object())
         with self.assertRaisesRegex(TypeError, "args_hint"):
             hpk.command("valdris-help", description="Help.", args_hint=object())
+
+    def test_cli_command_wraps_sync_handler_and_derives_help(self) -> None:
+        def setup_parser(parser):
+            parser.add_argument("--scope")
+
+        @hpk.command(
+            "valdris",
+            type=hpk.CommandType.CLI,
+            setup_fn=setup_parser,
+        )
+        def valdris(args):
+            """Manage Valdris state.
+
+            Supports status and repair operations.
+            """
+            return f"scope:{args.scope}"
+
+        spec = getattr(valdris, "_hpk_command_spec")
+        self.assertEqual(spec["type"], "cli")
+        self.assertEqual(spec["help"], "Manage Valdris state.")
+        self.assertIs(spec["setup_fn"], setup_parser)
+
+        args = types.SimpleNamespace(scope="private-value")
+        with self.assertLogs(level="INFO") as cap:
+            self.assertEqual(valdris(args), "scope:private-value")
+        joined = "\n".join(cap.output)
+        self.assertIn("valdris: invoked; type=cli", joined)
+        self.assertNotIn("private-value", joined)
+
+    def test_cli_command_reraises_without_logging_namespace_or_error(self) -> None:
+        @hpk.command("valdris", type="cli", description="Manage Valdris.")
+        def valdris(args):
+            raise RuntimeError("private CLI failure")
+
+        args = argparse.Namespace(token="private-value")
+        with self.assertLogs(level="WARNING") as cap:
+            with self.assertRaisesRegex(RuntimeError, "private CLI failure"):
+                valdris(args)
+        joined = "\n".join(cap.output)
+        self.assertIn("error_type=RuntimeError", joined)
+        self.assertNotIn("private CLI failure", joined)
+        self.assertNotIn("private-value", joined)
+
+    def test_cli_command_supports_no_argument_setup(self) -> None:
+        @hpk.command(
+            "valdris-status",
+            type="cli",
+            help="Show Valdris status",
+            description="Show the current Valdris status.",
+        )
+        def status(args):
+            return args
+
+        spec = getattr(status, "_hpk_command_spec")
+        parser = Mock()
+        self.assertIsNone(spec["setup_fn"](parser))
+        parser.assert_not_called()
+        self.assertEqual(spec["help"], "Show Valdris status")
+
+    def test_cli_command_rejects_async_handler_and_slash_only_options(self) -> None:
+        with self.assertRaisesRegex(TypeError, "CLI command handler must be synchronous"):
+
+            @hpk.command("valdris", type="cli", description="Manage Valdris.")
+            async def valdris(args):
+                return args
+
+        async def setup_parser(parser):
+            return None
+
+        with self.assertRaisesRegex(TypeError, "setup_fn must be synchronous"):
+            hpk.command(
+                "valdris",
+                type="cli",
+                description="Manage Valdris.",
+                setup_fn=setup_parser,
+            )
+
+        with self.assertRaisesRegex(ValueError, "args_hint is only valid"):
+            hpk.command(
+                "valdris",
+                type="cli",
+                description="Manage Valdris.",
+                args_hint="<scope>",
+            )
+
+        with self.assertRaisesRegex(ValueError, "help is only valid"):
+            hpk.command(
+                "valdris",
+                type="slash",
+                description="Manage Valdris.",
+                help="Manage Valdris",
+            )
+
+        with self.assertRaisesRegex(ValueError, "setup_fn is only valid"):
+            hpk.command(
+                "valdris",
+                type="slash",
+                description="Manage Valdris.",
+                setup_fn=lambda parser: None,
+            )
+
+    def test_command_rejects_invalid_type_and_cli_options(self) -> None:
+        with self.assertRaisesRegex(ValueError, "command type"):
+            hpk.command("valdris", type="terminal", description="Manage Valdris.")
+        with self.assertRaisesRegex(TypeError, "command help"):
+            hpk.command("valdris", type="cli", description="Manage Valdris.", help=1)
+        with self.assertRaisesRegex(TypeError, "setup_fn"):
+            hpk.command(
+                "valdris",
+                type="cli",
+                description="Manage Valdris.",
+                setup_fn="not-callable",
+            )
 
 
 class HostToolInvocationTests(unittest.TestCase):
@@ -993,6 +1111,19 @@ class RegisterPluginTests(unittest.TestCase):
             setattr(module, name, value)
         return module
 
+    def test_registration_summary_preserves_positional_middleware_argument(self) -> None:
+        summary = hpk.RegistrationSummary(
+            (),
+            (),
+            (),
+            (),
+            (),
+            ("tool_request",),
+        )
+
+        self.assertEqual(summary.middlewares, ("tool_request",))
+        self.assertEqual(summary.cli_commands, ())
+
     def test_registers_all_lifecycle_surfaces_with_summary(self) -> None:
         @hpk.command(
             "valdris-status",
@@ -1001,6 +1132,19 @@ class RegisterPluginTests(unittest.TestCase):
         )
         def command_handler(raw_args):
             return raw_args
+
+        def setup_cli(parser):
+            parser.add_argument("--scope")
+
+        @hpk.command(
+            "valdris",
+            type="cli",
+            description="Manage Valdris from the terminal.",
+            help="Manage Valdris",
+            setup_fn=setup_cli,
+        )
+        def cli_command_handler(args):
+            return args
 
         @hpk.hook("pre_llm_call")
         def callback(**kwargs):
@@ -1019,6 +1163,7 @@ class RegisterPluginTests(unittest.TestCase):
             ctx = FakePluginCtx()
             module = self._module(
                 callback=callback,
+                cli_command_handler=cli_command_handler,
                 command_handler=command_handler,
                 request_middleware=request_middleware,
                 sample_read=sample_read,
@@ -1027,6 +1172,7 @@ class RegisterPluginTests(unittest.TestCase):
                 summary = hpk.register_plugin(ctx, module, skills=(skill,))
 
         self.assertEqual(summary.commands, ("valdris-status",))
+        self.assertEqual(summary.cli_commands, ("valdris",))
         self.assertEqual(summary.tools, ("sample_read_thread",))
         self.assertEqual(summary.middlewares, ("tool_request",))
         self.assertEqual(summary.hooks, ("pre_llm_call",))
@@ -1044,12 +1190,25 @@ class RegisterPluginTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            ctx.cli_commands,
+            [
+                {
+                    "name": "valdris",
+                    "help": "Manage Valdris",
+                    "setup_fn": setup_cli,
+                    "handler_fn": cli_command_handler,
+                    "description": "Manage Valdris from the terminal.",
+                }
+            ],
+        )
+        self.assertEqual(
             ctx.middlewares,
             [("tool_request", request_middleware)],
         )
         self.assertEqual(ctx.hooks, [("pre_llm_call", callback)])
         self.assertEqual(ctx.skills[0]["name"], "temporal-awareness")
         self.assertIn("commands=valdris-status", "\n".join(cap.output))
+        self.assertIn("cli_commands=valdris", "\n".join(cap.output))
         self.assertIn("tools=sample_read_thread", "\n".join(cap.output))
         self.assertIn("middlewares=tool_request", "\n".join(cap.output))
         self.assertIn("hooks=pre_llm_call", "\n".join(cap.output))
@@ -1148,6 +1307,38 @@ class RegisterPluginTests(unittest.TestCase):
             hpk.register_plugin(ctx, self._module(first=first, second=second))
         self.assertEqual(ctx.commands, [])
         self.assertEqual(ctx.tools, [])
+
+    def test_rejects_duplicate_cli_command_names_before_registration(self) -> None:
+        @hpk.command("valdris", type="cli", description="First CLI command.")
+        def first(args):
+            return args
+
+        @hpk.command("valdris", type=hpk.CommandType.CLI, description="Second CLI command.")
+        def second(args):
+            return args
+
+        ctx = FakePluginCtx()
+        with self.assertRaisesRegex(ValueError, "duplicate CLI command"):
+            hpk.register_plugin(ctx, self._module(first=first, second=second))
+        self.assertEqual(ctx.cli_commands, [])
+        self.assertEqual(ctx.tools, [])
+
+    def test_allows_same_name_on_slash_and_cli_surfaces(self) -> None:
+        @hpk.command("valdris", type="slash", description="Slash command.")
+        def slash(raw_args):
+            return raw_args
+
+        @hpk.command("valdris", type="cli", description="CLI command.")
+        def cli(args):
+            return args
+
+        ctx = FakePluginCtx()
+        summary = hpk.register_plugin(ctx, self._module(slash=slash, cli=cli))
+
+        self.assertEqual(summary.commands, ("valdris",))
+        self.assertEqual(summary.cli_commands, ("valdris",))
+        self.assertEqual([entry["name"] for entry in ctx.commands], ["valdris"])
+        self.assertEqual([entry["name"] for entry in ctx.cli_commands], ["valdris"])
 
     def test_rejects_duplicate_skill_names(self) -> None:
         skills = (

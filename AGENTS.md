@@ -7,9 +7,11 @@ plugin.
 
 ## Working Rules
 
-- Keep `@tool` and `register_all` backward compatible. Use `@command`,
-  `@middleware`, `@hook`, `plugin_skill`, and `register_plugin` for full plugin
-  lifecycle registration.
+- Keep `@tool`, slash-default `@command`, and `register_all` backward
+  compatible. Use `@command(type="cli")` for terminal subcommands and
+  `@command(type="slash")` for explicit in-session commands; use
+  `@middleware`, `@hook`, `plugin_skill`, and `register_plugin` for full
+  plugin lifecycle registration.
 - Use `load_plugin_config` for effective `plugins.<name>` runtime settings;
   current Hermes `PluginManifest` objects do not expose profile config. Use
   `configure_stderr_logging` for operator-gated registration receipts instead

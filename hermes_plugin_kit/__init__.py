@@ -49,6 +49,7 @@ Usage::
 
 from __future__ import annotations
 
+import argparse
 import copy
 import functools
 import importlib
@@ -81,6 +82,7 @@ __all__ = [
     "MediaPayload",
     "ResolvedDeliveryTarget",
     "MediaDeliveryResult",
+    "CommandType",
     "MiddlewareKind",
     "PluginSkill",
     "RegistrationSummary",
@@ -143,6 +145,14 @@ class RegistrationSummary:
     skipped_optional_skills: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()
     middlewares: tuple[str, ...] = ()
+    cli_commands: tuple[str, ...] = ()
+
+
+class CommandType(str, Enum):
+    """Command surfaces currently supported by hermes-agent."""
+
+    SLASH = "slash"
+    CLI = "cli"
 
 
 class MiddlewareKind(str, Enum):
@@ -498,17 +508,38 @@ def _safe_context(kwargs: dict[str, Any]) -> dict[str, Any]:
 # Decorators
 # ---------------------------------------------------------------------------
 
+def _noop_cli_setup(_parser: argparse.ArgumentParser) -> None:
+    """Configure a CLI command that accepts no command-specific arguments."""
+
+
 def command(
     name: str,
     description: str | None = None,
     args_hint: str = "",
+    *,
+    type: CommandType | str = CommandType.SLASH,
+    help: str | None = None,
+    setup_fn: Callable[[argparse.ArgumentParser], None] | None = None,
 ) -> Callable:
-    """Mark and instrument a Hermes in-session slash command.
+    """Mark and instrument a Hermes slash or terminal CLI command.
 
-    ``name`` is the bare command name without a leading slash. The wrapped
-    handler receives the original ``raw_args`` string and returns ``str | None``.
-    Synchronous and asynchronous handlers preserve their native callable shape.
+    Slash commands are the backward-compatible default. Their handler receives
+    the original ``raw_args`` string and may be synchronous or asynchronous.
+
+    CLI commands use ``type="cli"``. Their synchronous handler receives an
+    ``argparse.Namespace``. ``setup_fn`` may configure the argparse subparser;
+    when omitted, the command accepts no command-specific arguments. ``help``
+    defaults to the first line of the resolved description.
     """
+    if isinstance(type, CommandType):
+        command_type = type
+    elif isinstance(type, str):
+        try:
+            command_type = CommandType(type.strip().lower())
+        except ValueError:
+            raise ValueError("command type must be 'slash' or 'cli'") from None
+    else:
+        raise TypeError("command type must be a CommandType or string")
     if not isinstance(name, str) or not _COMMAND_NAME_RE.fullmatch(name):
         raise ValueError(
             "command name must be a bare lowercase kebab-case name matching "
@@ -518,7 +549,24 @@ def command(
         raise TypeError("command description must be a string or None")
     if not isinstance(args_hint, str):
         raise TypeError("command args_hint must be a string")
+    if help is not None and not isinstance(help, str):
+        raise TypeError("command help must be a string or None")
+    if setup_fn is not None and not callable(setup_fn):
+        raise TypeError("command setup_fn must be callable or None")
     clean_args_hint = args_hint.strip()
+    clean_help = (help or "").strip()
+    if command_type is CommandType.CLI and clean_args_hint:
+        raise ValueError("command args_hint is only valid for slash commands")
+    if command_type is CommandType.SLASH and help is not None:
+        raise ValueError("command help is only valid for CLI commands")
+    if command_type is CommandType.SLASH and setup_fn is not None:
+        raise ValueError("command setup_fn is only valid for CLI commands")
+    if (
+        command_type is CommandType.CLI
+        and setup_fn is not None
+        and inspect.iscoroutinefunction(setup_fn)
+    ):
+        raise TypeError("CLI command setup_fn must be synchronous")
 
     def decorate(fn: Callable) -> Callable:
         explicit_description = (description or "").strip()
@@ -528,9 +576,11 @@ def command(
                 f"@command {name!r}: a description is required "
                 "(docstring or description=)."
             )
+        if command_type is CommandType.CLI and inspect.iscoroutinefunction(fn):
+            raise TypeError("CLI command handler must be synchronous")
         log = logging.getLogger(fn.__module__ or "hermes_plugin_kit")
 
-        def log_invocation(raw_args: str) -> float:
+        def log_slash_invocation(raw_args: str) -> float:
             started = time.perf_counter()
             try:
                 args_chars = len(raw_args)
@@ -539,12 +589,17 @@ def command(
             log.debug("%s: invoked; args_chars=%d", name, args_chars)
             return started
 
+        def log_cli_invocation() -> float:
+            started = time.perf_counter()
+            log.info("%s: invoked; type=cli", name)
+            return started
+
         def log_failure(started: float, exc: Exception) -> None:
             log.warning(
                 "%s: handler raised; elapsed_ms=%.2f; error_type=%s",
                 name,
                 (time.perf_counter() - started) * 1000,
-                type(exc).__name__,
+                exc.__class__.__name__,
             )
 
         def log_success(started: float, result: Any) -> None:
@@ -552,14 +607,28 @@ def command(
                 "%s: ok; elapsed_ms=%.2f; result=%s",
                 name,
                 (time.perf_counter() - started) * 1000,
-                type(result).__name__,
+                result.__class__.__name__,
             )
 
-        if inspect.iscoroutinefunction(fn):
+        if command_type is CommandType.CLI:
+
+            @functools.wraps(fn)
+            def cli_wrapper(args: argparse.Namespace) -> Any:
+                started = log_cli_invocation()
+                try:
+                    result = fn(args)
+                except Exception as exc:
+                    log_failure(started, exc)
+                    raise
+                log_success(started, result)
+                return result
+
+            wrapper = cli_wrapper
+        elif inspect.iscoroutinefunction(fn):
 
             @functools.wraps(fn)
             async def async_wrapper(raw_args: str) -> str | None:
-                started = log_invocation(raw_args)
+                started = log_slash_invocation(raw_args)
                 try:
                     result = await fn(raw_args)
                 except Exception as exc:
@@ -573,7 +642,7 @@ def command(
 
             @functools.wraps(fn)
             def sync_wrapper(raw_args: str) -> str | None:
-                started = log_invocation(raw_args)
+                started = log_slash_invocation(raw_args)
                 try:
                     result = fn(raw_args)
                 except Exception as exc:
@@ -584,13 +653,26 @@ def command(
 
             wrapper = sync_wrapper
 
+        command_help: str | None = None
+        command_setup_fn: Callable[[argparse.ArgumentParser], None] | None = None
+        if command_type is CommandType.CLI:
+            command_help = clean_help or next(
+                line.strip()
+                for line in doc.splitlines()
+                if line.strip()
+            )
+            command_setup_fn = setup_fn or _noop_cli_setup
+
         setattr(
             wrapper,
             _COMMAND_SPEC_ATTR,
             {
                 "name": name,
+                "type": command_type.value,
                 "description": doc,
                 "args_hint": clean_args_hint,
+                "help": command_help,
+                "setup_fn": command_setup_fn,
             },
         )
         return wrapper
@@ -1397,7 +1479,7 @@ def register_plugin(
     module: Any,
     skills: tuple[PluginSkill, ...] | list[PluginSkill] = (),
 ) -> RegistrationSummary:
-    """Register decorated commands, tools, middleware, hooks, and skills.
+    """Register decorated slash/CLI commands, tools, middleware, hooks, and skills.
 
     Unlike the backward-compatible :func:`register_all`, this lifecycle-level
     entrypoint rejects distinct declarations that share a public name. Missing
@@ -1407,17 +1489,33 @@ def register_plugin(
         module = sys.modules[module]
     log = logging.getLogger(getattr(module, "__name__", "hermes_plugin_kit"))
 
-    commands: dict[str, Callable] = {}
+    slash_commands: dict[str, Callable] = {}
+    cli_commands: dict[str, Callable] = {}
     tools: dict[str, Callable] = {}
     middlewares: dict[str, Callable] = {}
     hooks: dict[str, Callable] = {}
     for _, obj in inspect.getmembers(module):
         command_spec = getattr(obj, _COMMAND_SPEC_ATTR, None)
         if command_spec:
-            existing = commands.get(command_spec["name"])
+            raw_command_type = command_spec.get("type", CommandType.SLASH.value)
+            try:
+                command_type = CommandType(raw_command_type)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"unsupported command type: {raw_command_type!r}"
+                ) from None
+            command_registry = (
+                cli_commands
+                if command_type is CommandType.CLI
+                else slash_commands
+            )
+            existing = command_registry.get(command_spec["name"])
             if existing is not None and existing is not obj:
-                raise ValueError(f"duplicate command name: {command_spec['name']}")
-            commands[command_spec["name"]] = obj
+                label = "CLI command" if command_type is CommandType.CLI else "command"
+                raise ValueError(
+                    f"duplicate {label} name: {command_spec['name']}"
+                )
+            command_registry[command_spec["name"]] = obj
 
         tool_spec = getattr(obj, _SPEC_ATTR, None)
         if tool_spec:
@@ -1466,9 +1564,9 @@ def register_plugin(
         )
         skipped_skills.append(name)
 
-    registered_commands: list[str] = []
-    for name in sorted(commands):
-        obj = commands[name]
+    registered_slash_commands: list[str] = []
+    for name in sorted(slash_commands):
+        obj = slash_commands[name]
         spec = getattr(obj, _COMMAND_SPEC_ATTR)
         ctx.register_command(
             name=spec["name"],
@@ -1476,7 +1574,20 @@ def register_plugin(
             description=spec["description"],
             args_hint=spec["args_hint"],
         )
-        registered_commands.append(name)
+        registered_slash_commands.append(name)
+
+    registered_cli_commands: list[str] = []
+    for name in sorted(cli_commands):
+        obj = cli_commands[name]
+        spec = getattr(obj, _COMMAND_SPEC_ATTR)
+        ctx.register_cli_command(
+            name=spec["name"],
+            help=spec["help"],
+            setup_fn=spec["setup_fn"],
+            handler_fn=obj,
+            description=spec["description"],
+        )
+        registered_cli_commands.append(name)
 
     registered_tools: list[str] = []
     for name in sorted(tools):
@@ -1505,7 +1616,8 @@ def register_plugin(
         registered_skills.append(skill.name)
 
     summary = RegistrationSummary(
-        commands=tuple(registered_commands),
+        commands=tuple(registered_slash_commands),
+        cli_commands=tuple(registered_cli_commands),
         tools=tuple(registered_tools),
         middlewares=tuple(registered_middlewares),
         hooks=tuple(registered_hooks),
@@ -1513,9 +1625,11 @@ def register_plugin(
         skipped_optional_skills=tuple(skipped_skills),
     )
     log.info(
-        "hermes_plugin_kit: registered plugin lifecycle; commands=%s; tools=%s; "
-        "middlewares=%s; hooks=%s; skills=%s; skipped_optional_skills=%s",
+        "hermes_plugin_kit: registered plugin lifecycle; commands=%s; "
+        "cli_commands=%s; tools=%s; middlewares=%s; hooks=%s; skills=%s; "
+        "skipped_optional_skills=%s",
         ",".join(summary.commands) or "<none>",
+        ",".join(summary.cli_commands) or "<none>",
         ",".join(summary.tools) or "<none>",
         ",".join(summary.middlewares) or "<none>",
         ",".join(summary.hooks) or "<none>",
