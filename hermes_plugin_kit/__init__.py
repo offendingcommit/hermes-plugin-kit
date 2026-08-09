@@ -61,10 +61,11 @@ import re
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator, Protocol
 
 __all__ = [
     "tool",
@@ -75,6 +76,13 @@ __all__ = [
     "register_plugin",
     "log_registration_summary",
     "invoke_host_tool",
+    "open_session_db",
+    "read_session",
+    "list_sessions",
+    "read_session_messages",
+    "append_session_message",
+    "SessionDBLike",
+    "SessionDBCompatibilityError",
     "deliver_media",
     "resolve_delivery_target",
     "transform_media_delivery_output",
@@ -124,6 +132,183 @@ _MEDIA_DELIVERY_STATE_TTL_SECONDS = 300.0
 _MEDIA_DELIVERY_STATE: dict[str, float] = {}
 _MEDIA_DELIVERY_STATE_LOCK = threading.Lock()
 _TELEGRAM_SPOILER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+class SessionDBCompatibilityError(RuntimeError):
+    """Hermes does not expose the SessionDB contract required by the kit."""
+
+
+class SessionDBLike(Protocol):
+    """Public SessionDB methods used by the kit's state helpers."""
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None: ...
+
+    def list_sessions_rich(self, **kwargs: Any) -> list[dict[str, Any]]: ...
+
+    def get_messages(self, session_id: str, **kwargs: Any) -> list[dict[str, Any]]: ...
+
+    def append_message(
+        self, session_id: str, role: str, content: Any = None, **kwargs: Any
+    ) -> int: ...
+
+    def close(self) -> None: ...
+
+
+def _session_db_method(db: Any, method_name: str) -> Callable[..., Any]:
+    method = getattr(db, method_name, None)
+    if not callable(method):
+        raise SessionDBCompatibilityError(
+            "hermes-agent SessionDB is incompatible: required public method "
+            f"{method_name}() is unavailable"
+        )
+    return method
+
+
+def _call_session_db(
+    db: Any, method_name: str, *args: Any, **kwargs: Any
+) -> Any:
+    method = _session_db_method(db, method_name)
+    try:
+        inspect.signature(method).bind(*args, **kwargs)
+    except (TypeError, ValueError) as exc:
+        raise SessionDBCompatibilityError(
+            "hermes-agent SessionDB is incompatible: public method "
+            f"{method_name}() does not accept the required arguments: {exc}"
+        ) from exc
+    return method(*args, **kwargs)
+
+
+@contextmanager
+def open_session_db(
+    db_path: str | Path | None = None,
+    *,
+    db: SessionDBLike | None = None,
+) -> Iterator[SessionDBLike]:
+    """Yield an injected or lazily opened Hermes ``SessionDB``.
+
+    An injected handle remains caller-owned and is never closed here. When the
+    kit constructs the handle, it closes it on context exit. Constructing a
+    real ``SessionDB`` may migrate the selected database, so tests should
+    always provide a path in temporary storage.
+    """
+    if db is not None and db_path is not None:
+        raise ValueError("db and db_path are mutually exclusive")
+    if db is not None:
+        yield db
+        return
+    try:
+        from hermes_state import SessionDB
+    except (ImportError, AttributeError) as exc:
+        raise SessionDBCompatibilityError(
+            "hermes-agent SessionDB is unavailable; run inside a compatible "
+            "Hermes runtime or inject a SessionDB-compatible handle"
+        ) from exc
+
+    if db_path is None:
+        owned_db = SessionDB()
+    else:
+        try:
+            inspect.signature(SessionDB).bind(db_path=Path(db_path))
+        except (TypeError, ValueError) as exc:
+            raise SessionDBCompatibilityError(
+                "hermes-agent SessionDB does not support the required db_path contract"
+            ) from exc
+        owned_db = SessionDB(db_path=Path(db_path))
+    try:
+        yield owned_db
+    finally:
+        _session_db_method(owned_db, "close")()
+
+
+def read_session(db: SessionDBLike, session_id: str) -> dict[str, Any] | None:
+    """Read one session through Hermes' public SessionDB API."""
+    return _call_session_db(db, "get_session", session_id)
+
+
+def list_sessions(
+    db: SessionDBLike,
+    *,
+    source: str | None = None,
+    sources: list[str] | None = None,
+    exclude_sources: list[str] | None = None,
+    cwd_prefix: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    include_children: bool = False,
+    min_message_count: int = 0,
+    project_compression_tips: bool = True,
+    order_by_last_active: bool = False,
+    include_archived: bool = False,
+    archived_only: bool = False,
+    id_query: str | None = None,
+    search_query: str | None = None,
+    compact_rows: bool = False,
+    include_pinned: bool = False,
+    session_key: str | None = None,
+) -> list[dict[str, Any]]:
+    """List rich session rows using Hermes-supported filters and pagination."""
+    return _call_session_db(
+        db,
+        "list_sessions_rich",
+        source=source,
+        sources=sources,
+        exclude_sources=exclude_sources,
+        cwd_prefix=cwd_prefix,
+        limit=limit,
+        offset=offset,
+        include_children=include_children,
+        min_message_count=min_message_count,
+        project_compression_tips=project_compression_tips,
+        order_by_last_active=order_by_last_active,
+        include_archived=include_archived,
+        archived_only=archived_only,
+        id_query=id_query,
+        search_query=search_query,
+        compact_rows=compact_rows,
+        include_pinned=include_pinned,
+        session_key=session_key,
+    )
+
+
+def read_session_messages(
+    db: SessionDBLike,
+    session_id: str,
+    *,
+    include_inactive: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
+    latest: bool = False,
+    after_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """Read a session transcript using Hermes' ordering and paging rules."""
+    return _call_session_db(
+        db,
+        "get_messages",
+        session_id,
+        include_inactive=include_inactive,
+        limit=limit,
+        offset=offset,
+        latest=latest,
+        after_id=after_id,
+    )
+
+
+def append_session_message(
+    db: SessionDBLike,
+    session_id: str,
+    role: str,
+    content: Any = None,
+    **message_fields: Any,
+) -> int:
+    """Append a message, forwarding structured fields to Hermes unchanged."""
+    return _call_session_db(
+        db,
+        "append_message",
+        session_id,
+        role,
+        content,
+        **message_fields,
+    )
 
 
 @dataclass(frozen=True)

@@ -23,7 +23,7 @@ Repository = "https://github.com/offendingcommit/hermes-plugin-kit"
 # Runtime stays dependency-free. The hermes contract tests import current
 # upstream source, whose plugin and gateway seams transitively need these.
 [dependency-groups]
-dev = ["pyyaml", "requests==2.33.0"]
+dev = ["httpx[socks]==0.28.1", "pyyaml", "requests==2.33.0"]
 
 [tool.setuptools]
 packages = ["hermes_plugin_kit"]

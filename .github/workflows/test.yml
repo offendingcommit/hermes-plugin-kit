@@ -35,4 +35,6 @@ jobs:
       - name: Run hermes contract tests against upstream main
         env:
           HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent
-        run: uv run python -m unittest tests.test_hermes_contract -v
+        run: |
+          git -C "$HERMES_AGENT_PATH" rev-parse HEAD
+          uv run python -m unittest tests.test_hermes_contract -v

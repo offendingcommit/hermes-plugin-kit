@@ -379,6 +379,38 @@ A handler returns a `dict` (becomes the success `data`), or raises (becomes a to
 error), or returns a `str` as an escape hatch (treated as already-encoded JSON). It must
 accept `(args, **kwargs)` — runtime keys like `task_id`/`session_id` arrive as kwargs.
 
+## Session state helpers
+
+The kit can read sessions and messages and append transcript rows through
+Hermes' public `SessionDB` API. It imports Hermes only when a database is
+opened, so the package keeps its zero-dependency runtime contract:
+
+```python
+from hermes_plugin_kit import (
+    append_session_message,
+    open_session_db,
+    read_session,
+    read_session_messages,
+)
+
+with open_session_db() as db:  # current Hermes profile's state.db
+    session = read_session(db, session_id)
+    messages = read_session_messages(db, session_id, limit=50, latest=True)
+    row_id = append_session_message(db, session_id, "user", "Remember this")
+```
+
+`open_session_db(db_path)` constructs a Hermes `SessionDB` for that path and
+closes it on exit. `open_session_db(db=existing_db)` borrows a caller-owned
+handle and leaves it open. Supplying both is an error. Prefer the injected form
+inside a running plugin when Hermes already owns the profile-scoped handle.
+
+Opening a writable `SessionDB` can migrate its schema. Tests must therefore use
+a generated database or a copy under temporary storage; never a developer's
+live `~/.hermes/state.db`. Production helpers issue no raw SQL and delegate
+ordering, pagination, structured message encoding, locking, and migration to
+Hermes itself. An incompatible Hermes build raises
+`SessionDBCompatibilityError` naming the missing contract.
+
 ## Calling host-managed capabilities
 
 Not every Hermes capability lives in `tools.registry`. In particular,

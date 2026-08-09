@@ -21,7 +21,10 @@ import argparse
 import inspect
 import json
 import os
+import sqlite3
+import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from pathlib import Path
@@ -60,6 +63,7 @@ def _import_real_hermes():
             run_tool_execution_middleware,
         )
         from tools.registry import registry  # type: ignore
+        from hermes_state import SCHEMA_VERSION, SessionDB  # type: ignore
 
         # A stale checkout that predates plugin-owned skills is not the
         # lifecycle contract this suite is intended to certify.
@@ -84,6 +88,8 @@ def _import_real_hermes():
             run_llm_execution_middleware=run_llm_execution_middleware,
             run_tool_execution_middleware=run_tool_execution_middleware,
             registry=registry,
+            SCHEMA_VERSION=SCHEMA_VERSION,
+            SessionDB=SessionDB,
         )
 
     try:
@@ -106,6 +112,72 @@ def _import_real_hermes():
 
 
 _REAL = _import_real_hermes()
+
+
+def _write_legacy_state_db(db_path: Path) -> None:
+    """Create a tiny pre-v16 database without borrowing a user's state."""
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE schema_version (version INTEGER NOT NULL);
+            INSERT INTO schema_version VALUES (15);
+
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                user_id TEXT,
+                session_key TEXT,
+                chat_id TEXT,
+                chat_type TEXT,
+                thread_id TEXT,
+                model TEXT,
+                model_config TEXT,
+                system_prompt TEXT,
+                parent_session_id TEXT,
+                started_at REAL NOT NULL,
+                ended_at REAL,
+                end_reason TEXT,
+                message_count INTEGER DEFAULT 0,
+                tool_call_count INTEGER DEFAULT 0,
+                input_tokens INTEGER DEFAULT 0,
+                output_tokens INTEGER DEFAULT 0,
+                cache_read_tokens INTEGER DEFAULT 0,
+                cache_write_tokens INTEGER DEFAULT 0,
+                reasoning_tokens INTEGER DEFAULT 0,
+                cwd TEXT,
+                git_branch TEXT,
+                git_repo_root TEXT,
+                title TEXT
+            );
+
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL REFERENCES sessions(id),
+                role TEXT NOT NULL,
+                content TEXT,
+                tool_call_id TEXT,
+                tool_calls TEXT,
+                tool_name TEXT,
+                timestamp REAL NOT NULL,
+                token_count INTEGER,
+                finish_reason TEXT,
+                reasoning TEXT,
+                active INTEGER NOT NULL DEFAULT 1
+            );
+
+            INSERT INTO sessions (
+                id, source, model, started_at, message_count, title
+            ) VALUES ('legacy-session', 'cli', 'legacy-model', 100, 2, 'Legacy');
+            INSERT INTO messages (session_id, role, content, timestamp)
+                VALUES ('legacy-session', 'user', 'legacy question', 101);
+            INSERT INTO messages (session_id, role, content, timestamp)
+                VALUES ('legacy-session', 'assistant', 'legacy answer', 102);
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 class _RecordingCtx:
@@ -147,6 +219,21 @@ async def hpk_command_contract_probe(raw_args):
 class HermesContractTests(unittest.TestCase):
     """Validate the kit's output against genuine hermes-agent runtime APIs."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        root = os.environ.get("HERMES_AGENT_PATH")
+        if root:
+            try:
+                commit = subprocess.run(
+                    ["git", "-C", root, "rev-parse", "HEAD"],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+            except (OSError, subprocess.CalledProcessError):
+                commit = "unknown"
+            print(f"hermes-agent contract commit: {commit}")
+
     def _register_probe(self):
         reg = _REAL.registry
         reg.register(
@@ -160,6 +247,89 @@ class HermesContractTests(unittest.TestCase):
         )
         self.addCleanup(reg.deregister, _SPEC["name"])
         return reg
+
+    def test_state_helpers_migrate_and_operate_on_temporary_legacy_db(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            _write_legacy_state_db(db_path)
+
+            with hpk.open_session_db(db_path) as owned:
+                legacy = hpk.read_session(owned, "legacy-session")
+                self.assertIsNotNone(legacy)
+                self.assertEqual(legacy["title"], "Legacy")
+                self.assertEqual(
+                    [m["content"] for m in hpk.read_session_messages(owned, "legacy-session")],
+                    ["legacy question", "legacy answer"],
+                )
+                self.assertIsNone(hpk.read_session(owned, "missing-session"))
+
+            conn = sqlite3.connect(db_path)
+            try:
+                version = conn.execute(
+                    "SELECT version FROM schema_version LIMIT 1"
+                ).fetchone()[0]
+            finally:
+                conn.close()
+            self.assertEqual(version, _REAL.SCHEMA_VERSION)
+
+            injected = _REAL.SessionDB(db_path=db_path)
+            try:
+                with hpk.open_session_db(db=injected) as borrowed:
+                    self.assertIs(borrowed, injected)
+                    injected.create_session("current-session", "cli")
+                    first_id = hpk.append_session_message(
+                        borrowed, "current-session", "user", "current question"
+                    )
+                    structured_id = hpk.append_session_message(
+                        borrowed,
+                        "current-session",
+                        "assistant",
+                        "current answer",
+                        tool_calls=[
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {"name": "probe", "arguments": "{}"},
+                            }
+                        ],
+                        reasoning_details=[{"type": "summary", "text": "checked"}],
+                        display_kind="status",
+                        display_metadata={"label": "complete"},
+                    )
+                self.assertLess(first_id, structured_id)
+                self.assertEqual(
+                    hpk.read_session(injected, "legacy-session")["id"],
+                    "legacy-session",
+                    "the injected handle must remain open",
+                )
+
+                page_one = hpk.list_sessions(injected, limit=1, offset=0)
+                page_two = hpk.list_sessions(injected, limit=1, offset=1)
+                self.assertEqual(page_one[0]["id"], "current-session")
+                self.assertEqual(page_two[0]["id"], "legacy-session")
+                self.assertEqual(
+                    [m["content"] for m in hpk.read_session_messages(
+                        injected, "current-session", limit=1, offset=1
+                    )],
+                    ["current answer"],
+                )
+                with self.assertRaisesRegex(ValueError, "incompatible"):
+                    hpk.read_session_messages(
+                        injected, "current-session", offset=1, after_id=first_id
+                    )
+            finally:
+                injected.close()
+
+            with hpk.open_session_db(db_path) as reopened:
+                messages = hpk.read_session_messages(reopened, "current-session")
+                self.assertEqual([m["content"] for m in messages], [
+                    "current question",
+                    "current answer",
+                ])
+                self.assertEqual(messages[1]["tool_calls"][0]["id"], "call-1")
+                reasoning_details = json.loads(messages[1]["reasoning_details"])
+                self.assertEqual(reasoning_details[0]["text"], "checked")
+                self.assertEqual(messages[1]["display_metadata"], {"label": "complete"})
 
     def test_kit_schema_survives_real_registry_conversion(self) -> None:
         # registry.get_definitions does the exact {**schema, "name": ...} spread the

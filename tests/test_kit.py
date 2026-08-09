@@ -48,6 +48,81 @@ class FakePluginCtx(FakeCtx):
         self.skills.append(kwargs)
 
 
+class SessionDBHelperTests(unittest.TestCase):
+    def test_injected_db_is_delegated_to_and_remains_open(self) -> None:
+        db = Mock()
+        db.get_session.return_value = {"id": "s1"}
+        db.list_sessions_rich.return_value = [{"id": "s1"}]
+        db.get_messages.return_value = [{"id": 7, "content": "hello"}]
+        db.append_message.return_value = 8
+
+        with hpk.open_session_db(db=db) as opened:
+            self.assertIs(opened, db)
+            self.assertEqual(hpk.read_session(opened, "s1"), {"id": "s1"})
+            self.assertEqual(hpk.list_sessions(opened, limit=1), [{"id": "s1"}])
+            self.assertEqual(
+                hpk.read_session_messages(opened, "s1", limit=1),
+                [{"id": 7, "content": "hello"}],
+            )
+            self.assertEqual(
+                hpk.append_session_message(
+                    opened,
+                    "s1",
+                    "assistant",
+                    "done",
+                    tool_calls=[{"id": "call-1"}],
+                ),
+                8,
+            )
+
+        db.close.assert_not_called()
+        db.get_messages.assert_called_once_with(
+            "s1",
+            include_inactive=False,
+            limit=1,
+            offset=0,
+            latest=False,
+            after_id=None,
+        )
+        db.append_message.assert_called_once_with(
+            "s1", "assistant", "done", tool_calls=[{"id": "call-1"}]
+        )
+
+    def test_db_and_path_are_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            with hpk.open_session_db("state.db", db=Mock()):
+                pass
+
+    def test_missing_public_method_has_instructive_error(self) -> None:
+        with self.assertRaisesRegex(
+            hpk.SessionDBCompatibilityError, "required public method get_session"
+        ):
+            hpk.read_session(object(), "s1")
+
+    def test_incompatible_public_signature_has_instructive_error(self) -> None:
+        db = types.SimpleNamespace(get_messages=lambda session_id: [])
+        with self.assertRaisesRegex(
+            hpk.SessionDBCompatibilityError,
+            r"get_messages\(\) does not accept the required arguments",
+        ):
+            hpk.read_session_messages(db, "s1", limit=1)
+
+    def test_missing_hermes_import_has_instructive_error(self) -> None:
+        real_import = __import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name == "hermes_state":
+                raise ImportError("not installed")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=guarded_import):
+            with self.assertRaisesRegex(
+                hpk.SessionDBCompatibilityError, "SessionDB is unavailable"
+            ):
+                with hpk.open_session_db("state.db"):
+                    pass
+
+
 class RuntimeCompatibilityTests(unittest.TestCase):
     def test_manifest_config_remains_compatible_without_loading_host_config(self) -> None:
         ctx = types.SimpleNamespace(
