@@ -515,6 +515,20 @@ The kit never logs handler result payloads. Keys containing `token`, `secret`,
 `password`, `passwd`, `api_key`, `apikey`, or `auth` are replaced with `***` at
 any nesting depth before arguments are logged.
 
+## Agent skills
+
+Repository-owned skills are consumable directly from [`skills/`](skills). To
+make the Agent Plugins migration skill available to Codex while keeping this
+repository as the source of truth:
+
+```bash
+ln -s "$(pwd)/skills/migrate-agent-plugin" ~/.codex/skills/migrate-agent-plugin
+```
+
+Remove or rename an existing destination before creating the link. The skill
+includes its migration guide, client-extension rules, and validation checklist,
+so the linked directory is self-contained.
+
 ## Development
 
 Uses [uv](https://docs.astral.sh/uv/). Install it with `brew install uv` (macOS) or
