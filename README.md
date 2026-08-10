@@ -447,6 +447,60 @@ deliver_media(
 )
 ```
 
+`plugin_skill` reads and validates the referenced file immediately, then checks
+it again during registration. Every required skill must contain closed YAML
+frontmatter, a non-empty body, matching `name` and `description` values, and
+well-shaped Hermes metadata. Optional missing files remain skippable; if an
+optional file exists, it must satisfy the same contract.
+
+```yaml
+---
+name: temporal-awareness
+description: Calibrate responses against local time and message gaps.
+platforms: [macos, linux]
+metadata:
+  hermes:
+    tags: [Time, Context]
+    requires_toolsets: [terminal]
+---
+```
+
+The validator covers Hermes platform, conditional activation, config,
+blueprint, environment-variable, and credential-file metadata shapes. Runtime
+activation and setup behavior remain owned by Hermes Agent.
+
+## Subagents and specialized providers
+
+Subagent lifecycle supervision is host-owned. Use the checked accessor instead
+of importing delegation internals:
+
+```python
+from agent.subagent_lifecycle import SubagentLaunchRequest
+from hermes_plugin_kit import get_subagent_lifecycle
+
+service = get_subagent_lifecycle(ctx)
+handle = service.launch(SubagentLaunchRequest(goal="Review this change."))
+```
+
+Memory, image-generation, and video-generation providers remain instances of
+their Hermes ABCs. Pass them to `register_plugin`; the kit validates the common
+identity seam and forwards each instance to the specialized context registry:
+
+```python
+return register_plugin(
+    ctx,
+    (),
+    memory_providers=(MyMemoryProvider(),),
+    image_gen_providers=(MyImageGenProvider(),),
+    video_gen_providers=(MyVideoGenProvider(),),
+)
+```
+
+Memory providers must run through Hermes' memory-provider discovery context.
+Image and video providers run through the general `PluginContext`. The kit does
+not decorate provider methods or replace the `MemoryProvider`,
+`ImageGenProvider`, or `VideoGenProvider` contracts.
+
 The ordinary path remains Hermes' host-managed `send_message`. Because that
 host contract does not currently expose Telegram's `has_spoiler`, only
 `spoiler=True` uses the kit's narrow Telegram extension. The extension accepts

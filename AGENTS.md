@@ -57,6 +57,9 @@ plugin.
   dictionaries unless deliberately returning an already-encoded string.
 - Keep validation errors instructive for model-facing callers, including the
   missing argument name and example when available.
+- Keep stateful Hermes provider ABCs as provider instances: register memory,
+  image-generation, and video-generation providers through their specialized
+  contexts instead of decorating provider methods as general plugin surfaces.
 - Redact secret-looking values in logs and avoid logging full untrusted payloads.
 - Use `uv` and the Makefile for local development:
   `make install`, `make test`, `make test-one T=tests.test_kit.SchemaConventionTests`,

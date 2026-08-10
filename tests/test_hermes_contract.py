@@ -75,6 +75,18 @@ def _import_real_hermes():
             raise ImportError(
                 "hermes-agent PluginContext.register_middleware is unavailable"
             )
+        if not hasattr(PluginContext, "subagent_lifecycle"):
+            raise ImportError(
+                "hermes-agent PluginContext.subagent_lifecycle is unavailable"
+            )
+        if not hasattr(PluginContext, "register_image_gen_provider"):
+            raise ImportError(
+                "hermes-agent PluginContext.register_image_gen_provider is unavailable"
+            )
+        if not hasattr(PluginContext, "register_video_gen_provider"):
+            raise ImportError(
+                "hermes-agent PluginContext.register_video_gen_provider is unavailable"
+            )
 
         return types.SimpleNamespace(
             apply_llm_request_middleware=apply_llm_request_middleware,
@@ -384,7 +396,11 @@ class HermesContractTests(unittest.TestCase):
 
         with TemporaryDirectory() as tmp:
             path = Path(tmp) / "SKILL.md"
-            path.write_text("# Contract skill\n")
+            path.write_text(
+                "---\nname: probe\ndescription: Contract probe\n"
+                "metadata:\n  hermes:\n    tags: [Contract]\n"
+                "---\n# Contract skill\n"
+            )
             with self.assertLogs("contract_lifecycle_plugin", level="INFO") as cap:
                 summary = hpk.register_plugin(
                     ctx,
@@ -397,7 +413,9 @@ class HermesContractTests(unittest.TestCase):
                 "plugin=contract-plugin; commands=<none>; "
                 "cli_commands=<none>; tools=<none>; middlewares=<none>; "
                 "hooks=pre_llm_call; skills=probe; "
-                "skipped_optional_skills=<none>",
+                "skipped_optional_skills=<none>; "
+                "memory_providers=<none>; "
+                "image_gen_providers=<none>; video_gen_providers=<none>",
                 cap.records[0].getMessage(),
             )
             self.assertEqual(
@@ -604,6 +622,18 @@ class HermesContractTests(unittest.TestCase):
             path=Path("SKILL.md"),
             description="Probe",
         )
+
+        image_sig = inspect.signature(_REAL.PluginContext.register_image_gen_provider)
+        image_sig.bind(None, object())
+        video_sig = inspect.signature(_REAL.PluginContext.register_video_gen_provider)
+        video_sig.bind(None, object())
+
+        manager = _REAL.PluginManager()
+        manifest = _REAL.PluginManifest(name="contract-plugin")
+        ctx = _REAL.PluginContext(manifest, manager)
+        service = hpk.get_subagent_lifecycle(ctx)
+        for method in ("launch", "status", "wait", "cancel", "result", "reconnect"):
+            self.assertTrue(callable(getattr(service, method)))
 
     def test_host_tool_invocation_reaches_real_telegram_media_contract(self) -> None:
         """Exercise Hermes media parsing and Telegram formatting without network I/O."""
