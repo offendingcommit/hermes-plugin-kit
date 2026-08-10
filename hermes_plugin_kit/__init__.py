@@ -65,7 +65,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Protocol
+from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
 
 __all__ = [
     "tool",
@@ -73,6 +73,7 @@ __all__ = [
     "middleware",
     "hook",
     "plugin_skill",
+    "get_subagent_lifecycle",
     "register_plugin",
     "log_registration_summary",
     "invoke_host_tool",
@@ -331,6 +332,9 @@ class RegistrationSummary:
     skipped_optional_skills: tuple[str, ...] = ()
     commands: tuple[str, ...] = ()
     middlewares: tuple[str, ...] = ()
+    memory_providers: tuple[str, ...] = ()
+    image_gen_providers: tuple[str, ...] = ()
+    video_gen_providers: tuple[str, ...] = ()
     cli_commands: tuple[str, ...] = ()
 
 
@@ -355,7 +359,9 @@ def log_registration_summary(
     logger.info(
         "hermes_plugin_kit: registered plugin lifecycle; plugin=%s; "
         "commands=%s; cli_commands=%s; tools=%s; middlewares=%s; hooks=%s; "
-        "skills=%s; skipped_optional_skills=%s",
+        "skills=%s; skipped_optional_skills=%s; memory_providers=%s; "
+        "image_gen_providers=%s; "
+        "video_gen_providers=%s",
         clean_plugin_name,
         ",".join(summary.commands) or "<none>",
         ",".join(summary.cli_commands) or "<none>",
@@ -364,6 +370,9 @@ def log_registration_summary(
         ",".join(summary.hooks) or "<none>",
         ",".join(summary.skills) or "<none>",
         ",".join(summary.skipped_optional_skills) or "<none>",
+        ",".join(summary.memory_providers) or "<none>",
+        ",".join(summary.image_gen_providers) or "<none>",
+        ",".join(summary.video_gen_providers) or "<none>",
     )
 
 
@@ -1043,6 +1052,125 @@ def hook(name: str) -> Callable:
     return decorate
 
 
+def _require_string_list(value: Any, field: str) -> None:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item.strip() for item in value
+    ):
+        raise ValueError(f"SKILL.md {field} must be a list of non-empty strings")
+
+
+def _validate_hermes_skill_metadata(frontmatter: Mapping[str, Any]) -> None:
+    platforms = frontmatter.get("platforms")
+    if platforms is not None:
+        _require_string_list(platforms, "platforms")
+        invalid = sorted(set(platforms) - {"macos", "linux", "windows"})
+        if invalid:
+            raise ValueError(
+                "SKILL.md platforms contains unsupported values: "
+                + ", ".join(invalid)
+            )
+
+    metadata = frontmatter.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        raise ValueError("SKILL.md metadata must be a mapping")
+    hermes = metadata.get("hermes", {})
+    if not isinstance(hermes, Mapping):
+        raise ValueError("SKILL.md metadata.hermes must be a mapping")
+    for field in (
+        "tags",
+        "related_skills",
+        "requires_toolsets",
+        "requires_tools",
+        "fallback_for_toolsets",
+        "fallback_for_tools",
+    ):
+        if field in hermes:
+            _require_string_list(hermes[field], f"metadata.hermes.{field}")
+
+    config = hermes.get("config")
+    if config is not None:
+        if not isinstance(config, list):
+            raise ValueError("SKILL.md metadata.hermes.config must be a list")
+        for item in config:
+            if not isinstance(item, Mapping):
+                raise ValueError("SKILL.md metadata.hermes.config entries must be mappings")
+            for required in ("key", "description"):
+                if not isinstance(item.get(required), str) or not item[required].strip():
+                    raise ValueError(
+                        f"SKILL.md metadata.hermes.config entries require {required}"
+                    )
+
+    blueprint = hermes.get("blueprint")
+    if blueprint is not None and not isinstance(blueprint, Mapping):
+        raise ValueError("SKILL.md metadata.hermes.blueprint must be a mapping")
+
+    for field, required_key in (
+        ("required_environment_variables", "name"),
+        ("required_credential_files", "path"),
+    ):
+        entries = frontmatter.get(field)
+        if entries is None:
+            continue
+        if not isinstance(entries, list):
+            raise ValueError(f"SKILL.md {field} must be a list")
+        for item in entries:
+            if not isinstance(item, Mapping):
+                raise ValueError(f"SKILL.md {field} entries must be mappings")
+            value = item.get(required_key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"SKILL.md {field} entries require {required_key}"
+                )
+
+
+def _read_skill_frontmatter(skill_path: Path) -> tuple[dict[str, Any], str]:
+    try:
+        content = skill_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"unable to read SKILL.md: {exc}") from exc
+    normalized = content.lstrip("\ufeff")
+    if not normalized.startswith("---\n"):
+        raise ValueError("SKILL.md must start with YAML frontmatter")
+    end = re.search(r"\n---\s*\n", normalized[4:])
+    if end is None:
+        raise ValueError("SKILL.md frontmatter is not closed")
+    yaml_text = normalized[4 : end.start() + 4]
+    try:
+        import yaml
+
+        loader = getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader
+        parsed = yaml.load(yaml_text, Loader=loader)
+    except Exception as exc:
+        raise ValueError(f"SKILL.md frontmatter is invalid YAML: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("SKILL.md frontmatter must be a mapping")
+    body = normalized[end.end() + 4 :]
+    if not body.strip():
+        raise ValueError("SKILL.md must contain instructions after frontmatter")
+    return parsed, body
+
+
+def _validate_plugin_skill_file(
+    name: str, skill_path: Path, description: str
+) -> None:
+    frontmatter, _ = _read_skill_frontmatter(skill_path)
+    declared_name = frontmatter.get("name")
+    declared_description = frontmatter.get("description")
+    if declared_name != name:
+        raise ValueError(
+            f"SKILL.md name {declared_name!r} does not match declaration {name!r}"
+        )
+    if not isinstance(declared_description, str) or not declared_description.strip():
+        raise ValueError("SKILL.md description must be a non-empty string")
+    if len(declared_description) > 1024:
+        raise ValueError("SKILL.md description must not exceed 1024 characters")
+    if declared_description.strip() != description.strip():
+        raise ValueError("SKILL.md description does not match plugin_skill declaration")
+    _validate_hermes_skill_metadata(frontmatter)
+
+
 def plugin_skill(
     name: str,
     path: str | Path,
@@ -1057,7 +1185,26 @@ def plugin_skill(
         raise ValueError("skill path must point to SKILL.md")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("skill description is required")
+    try:
+        _validate_plugin_skill_file(name, skill_path, description)
+    except FileNotFoundError:
+        if optional:
+            return PluginSkill(name, skill_path, description.strip(), True)
+        raise FileNotFoundError(f"SKILL.md not found at {skill_path}")
     return PluginSkill(name, skill_path, description.strip(), bool(optional))
+
+
+def get_subagent_lifecycle(ctx: Any) -> Any:
+    """Return Hermes' public subagent lifecycle service after contract checking."""
+    service = getattr(ctx, "subagent_lifecycle", None)
+    required = ("launch", "status", "wait", "cancel", "result", "reconnect")
+    missing = [name for name in required if not callable(getattr(service, name, None))]
+    if missing:
+        raise RuntimeError(
+            "hermes-agent subagent lifecycle API is unavailable or incompatible; "
+            "missing: " + ", ".join(missing)
+        )
+    return service
 
 
 def _load_host_tool(name: str) -> Callable:
@@ -1750,21 +1897,47 @@ def _register_tool(ctx: Any, handler: Callable, spec: dict[str, Any]) -> None:
     )
 
 
+def _register_generation_providers(
+    ctx: Any,
+    providers: Iterable[Any],
+    *,
+    kind: str,
+    registrar_name: str,
+) -> list[str]:
+    registrar = getattr(ctx, registrar_name, None)
+    if not callable(registrar):
+        raise RuntimeError(f"this Hermes plugin context does not support {kind} providers")
+    registered: list[str] = []
+    for provider in providers:
+        name = getattr(provider, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{kind} providers require a non-empty name")
+        if not callable(getattr(provider, "generate", None)):
+            raise ValueError(f"{kind} provider {name!r} requires generate()")
+        registrar(provider)
+        registered.append(name)
+    return registered
+
+
 def register_plugin(
     ctx: Any,
     module: Any | Iterable[Callable],
     skills: tuple[PluginSkill, ...] | list[PluginSkill] = (),
     *,
+    memory_providers: tuple[Any, ...] | list[Any] = (),
+    image_gen_providers: tuple[Any, ...] | list[Any] = (),
+    video_gen_providers: tuple[Any, ...] | list[Any] = (),
     plugin_name: str | None = None,
     logger: logging.Logger | None = None,
 ) -> RegistrationSummary:
-    """Register decorated slash/CLI commands, tools, middleware, hooks, and skills.
+    """Register decorated surfaces plus specialized Hermes providers.
 
     Unlike the backward-compatible :func:`register_all`, this lifecycle-level
     entrypoint rejects distinct declarations that share a public name. Missing
     optional skills are warned and skipped; missing required skills fail fast.
     Pass a module (or loaded module name) to discover all declarations, or an
     iterable of decorated callables to register only a runtime-active subset.
+    Provider instances retain their Hermes ABC contracts and are not decorated.
     """
     if isinstance(module, str):
         module = sys.modules[module]
@@ -1880,11 +2053,13 @@ def register_plugin(
     skipped_skills: list[str] = []
     for name in sorted(declared_skills):
         skill = declared_skills[name]
-        if skill.path.is_file():
+        try:
+            _validate_plugin_skill_file(skill.name, skill.path, skill.description)
             available_skills.append(skill)
             continue
-        if not skill.optional:
-            raise FileNotFoundError(f"SKILL.md not found at {skill.path}")
+        except FileNotFoundError:
+            if not skill.optional:
+                raise FileNotFoundError(f"SKILL.md not found at {skill.path}")
         log.warning(
             "hermes_plugin_kit: optional skill missing; name=%s; path=%s",
             skill.name,
@@ -1943,6 +2118,33 @@ def register_plugin(
         )
         registered_skills.append(skill.name)
 
+    registered_memory_providers: list[str] = []
+    register_memory_provider = getattr(ctx, "register_memory_provider", None)
+    if memory_providers and not callable(register_memory_provider):
+        raise RuntimeError(
+            "this Hermes plugin context does not support memory providers; "
+            "use the memory-provider discovery path"
+        )
+    for provider in memory_providers:
+        name = getattr(provider, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("memory providers require a non-empty name")
+        register_memory_provider(provider)
+        registered_memory_providers.append(name)
+
+    registered_image_gen_providers = _register_generation_providers(
+        ctx,
+        image_gen_providers,
+        kind="image generation",
+        registrar_name="register_image_gen_provider",
+    ) if image_gen_providers else []
+    registered_video_gen_providers = _register_generation_providers(
+        ctx,
+        video_gen_providers,
+        kind="video generation",
+        registrar_name="register_video_gen_provider",
+    ) if video_gen_providers else []
+
     summary = RegistrationSummary(
         commands=tuple(registered_slash_commands),
         cli_commands=tuple(registered_cli_commands),
@@ -1951,6 +2153,9 @@ def register_plugin(
         hooks=tuple(registered_hooks),
         skills=tuple(registered_skills),
         skipped_optional_skills=tuple(skipped_skills),
+        memory_providers=tuple(registered_memory_providers),
+        image_gen_providers=tuple(registered_image_gen_providers),
+        video_gen_providers=tuple(registered_video_gen_providers),
     )
     log_registration_summary(log, resolved_plugin_name, summary)
     return summary

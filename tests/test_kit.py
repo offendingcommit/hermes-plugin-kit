@@ -31,6 +31,17 @@ class FakePluginCtx(FakeCtx):
         self.middlewares: list[tuple[str, object]] = []
         self.hooks: list[tuple[str, object]] = []
         self.skills: list[dict] = []
+        self.image_gen_providers: list[object] = []
+        self.video_gen_providers: list[object] = []
+        self.memory_providers: list[object] = []
+        self.subagent_lifecycle = types.SimpleNamespace(
+            launch=lambda request: request,
+            status=lambda handle: handle,
+            wait=lambda handle, **kwargs: handle,
+            cancel=lambda handle, **kwargs: handle,
+            result=lambda handle: handle,
+            reconnect=lambda handle: handle,
+        )
 
     def register_command(self, **kwargs) -> None:
         self.commands.append(kwargs)
@@ -46,6 +57,15 @@ class FakePluginCtx(FakeCtx):
 
     def register_skill(self, **kwargs) -> None:
         self.skills.append(kwargs)
+
+    def register_image_gen_provider(self, provider) -> None:
+        self.image_gen_providers.append(provider)
+
+    def register_video_gen_provider(self, provider) -> None:
+        self.video_gen_providers.append(provider)
+
+    def register_memory_provider(self, provider) -> None:
+        self.memory_providers.append(provider)
 
 
 class SessionDBHelperTests(unittest.TestCase):
@@ -1351,7 +1371,10 @@ class RegisterPluginTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             skill_path = Path(tmp) / "SKILL.md"
-            skill_path.write_text("# Skill\n")
+            skill_path.write_text(
+                "---\nname: temporal-awareness\n"
+                "description: Use local timing context.\n---\n# Skill\n"
+            )
             skill = hpk.plugin_skill(
                 "temporal-awareness", skill_path, "Use local timing context."
             )
@@ -1409,6 +1432,84 @@ class RegisterPluginTests(unittest.TestCase):
         self.assertIn("hooks=pre_llm_call", "\n".join(cap.output))
         self.assertIn("skills=temporal-awareness", "\n".join(cap.output))
 
+    def test_plugin_skill_validates_frontmatter_and_matches_declaration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\n"
+                "name: temporal-awareness\n"
+                "description: Use local timing context.\n"
+                "platforms: [macos, linux]\n"
+                "metadata:\n"
+                "  hermes:\n"
+                "    tags: [Time, Context]\n"
+                "    requires_toolsets: [terminal]\n"
+                "required_environment_variables:\n"
+                "  - name: TIME_API_KEY\n"
+                "    prompt: Time API key\n"
+                "---\n"
+                "# Temporal awareness\n"
+            )
+
+            skill = hpk.plugin_skill(
+                "temporal-awareness", skill_path, "Use local timing context."
+            )
+
+        self.assertEqual(skill.name, "temporal-awareness")
+
+    def test_plugin_skill_rejects_invalid_or_drifting_frontmatter(self) -> None:
+        invalid_documents = {
+            "missing": "# Skill\n",
+            "name": "---\nname: other\ndescription: Description\n---\n# Skill\n",
+            "description": "---\nname: sample\ndescription: Other\n---\n# Skill\n",
+            "platforms": (
+                "---\nname: sample\ndescription: Description\n"
+                "platforms: [plan9]\n---\n# Skill\n"
+            ),
+            "hermes": (
+                "---\nname: sample\ndescription: Description\n"
+                "metadata:\n  hermes:\n    requires_tools: terminal\n"
+                "---\n# Skill\n"
+            ),
+            "empty-body": "---\nname: sample\ndescription: Description\n---\n",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "SKILL.md"
+            for label, document in invalid_documents.items():
+                with self.subTest(label=label):
+                    path.write_text(document)
+                    with self.assertRaises(ValueError):
+                        hpk.plugin_skill("sample", path, "Description")
+
+    def test_registers_specialized_providers_without_decorating_them(self) -> None:
+        image_provider = types.SimpleNamespace(name="image", generate=lambda prompt: prompt)
+        video_provider = types.SimpleNamespace(name="video", generate=lambda prompt: prompt)
+        memory_provider = types.SimpleNamespace(name="memory")
+        ctx = FakePluginCtx()
+
+        summary = hpk.register_plugin(
+            ctx,
+            self._module(),
+            memory_providers=(memory_provider,),
+            image_gen_providers=(image_provider,),
+            video_gen_providers=(video_provider,),
+        )
+
+        self.assertEqual(ctx.memory_providers, [memory_provider])
+        self.assertEqual(ctx.image_gen_providers, [image_provider])
+        self.assertEqual(ctx.video_gen_providers, [video_provider])
+        self.assertEqual(summary.memory_providers, ("memory",))
+        self.assertEqual(summary.image_gen_providers, ("image",))
+        self.assertEqual(summary.video_gen_providers, ("video",))
+
+    def test_get_subagent_lifecycle_requires_the_public_service_contract(self) -> None:
+        ctx = FakePluginCtx()
+        self.assertIs(hpk.get_subagent_lifecycle(ctx), ctx.subagent_lifecycle)
+
+        ctx.subagent_lifecycle = types.SimpleNamespace(launch=lambda request: request)
+        with self.assertRaises(RuntimeError):
+            hpk.get_subagent_lifecycle(ctx)
+
     def test_logs_one_stable_registration_receipt_with_actual_names(self) -> None:
         logger = logging.getLogger("registration-receipt-test")
         summary = hpk.RegistrationSummary(
@@ -1431,7 +1532,9 @@ class RegisterPluginTests(unittest.TestCase):
             "cli_commands=<none>; tools=sample_read_thread; "
             "middlewares=tool_request; "
             "hooks=pre_llm_call; skills=temporal-awareness; "
-            "skipped_optional_skills=missing-optional",
+            "skipped_optional_skills=missing-optional; "
+            "memory_providers=<none>; "
+            "image_gen_providers=<none>; video_gen_providers=<none>",
         )
 
     def test_register_plugin_uses_public_registration_summary_logger(self) -> None:
@@ -1505,17 +1608,8 @@ class RegisterPluginTests(unittest.TestCase):
         def callback(**kwargs):
             return kwargs
 
-        ctx = FakePluginCtx()
-        skill = hpk.plugin_skill("required", "/missing/SKILL.md", "Required")
         with self.assertRaises(FileNotFoundError):
-            hpk.register_plugin(
-                ctx,
-                self._module(callback=callback, sample_read=sample_read),
-                skills=(skill,),
-            )
-        self.assertEqual(ctx.tools, [])
-        self.assertEqual(ctx.hooks, [])
-        self.assertEqual(ctx.skills, [])
+            hpk.plugin_skill("required", "/missing/SKILL.md", "Required")
 
     def test_validates_skill_name_path_and_description(self) -> None:
         for args in [

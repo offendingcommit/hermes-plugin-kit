@@ -111,20 +111,22 @@ wheels = [
 name = "hermes-plugin-kit"
 version = "0.7.0"
 source = { editable = "." }
+dependencies = [
+    { name = "pyyaml" },
+]
 
 [package.dev-dependencies]
 dev = [
     { name = "httpx", extra = ["socks"] },
-    { name = "pyyaml" },
     { name = "requests" },
 ]
 
 [package.metadata]
+requires-dist = [{ name = "pyyaml", specifier = ">=6" }]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx", extras = ["socks"], specifier = "==0.28.1" },
-    { name = "pyyaml" },
     { name = "requests", specifier = "==2.33.0" },
 ]
 
