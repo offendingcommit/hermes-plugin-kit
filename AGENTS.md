@@ -69,3 +69,6 @@ plugin.
 
 When changing conventions or exported helpers, update `README.md` examples and
 tests together so consuming Hermes plugins have a reliable migration path.
+Keep `skills/hermes-plugins/references/plugin-kit.md` aligned with public API
+and contract changes so the repo-owned authoring skill does not teach stale
+behavior.
