@@ -95,7 +95,9 @@ __all__ = [
     "CommandType",
     "MiddlewareKind",
     "PluginSkill",
+    "CapabilitySelection",
     "RegistrationSummary",
+    "resolve_capability_selection",
     "load_plugin_config",
     "configure_stderr_logging",
     "register_all",
@@ -323,6 +325,14 @@ class PluginSkill:
 
 
 @dataclass(frozen=True)
+class CapabilitySelection:
+    """Validated capability names and their atomically expanded surfaces."""
+
+    capabilities: tuple[str, ...] = ()
+    names: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RegistrationSummary:
     """Inventory of lifecycle surfaces registered by :func:`register_plugin`."""
 
@@ -336,6 +346,7 @@ class RegistrationSummary:
     image_gen_providers: tuple[str, ...] = ()
     video_gen_providers: tuple[str, ...] = ()
     cli_commands: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
 
 
 class CommandType(str, Enum):
@@ -361,7 +372,7 @@ def log_registration_summary(
         "commands=%s; cli_commands=%s; tools=%s; middlewares=%s; hooks=%s; "
         "skills=%s; skipped_optional_skills=%s; memory_providers=%s; "
         "image_gen_providers=%s; "
-        "video_gen_providers=%s",
+        "video_gen_providers=%s; capabilities=%s",
         clean_plugin_name,
         ",".join(summary.commands) or "<none>",
         ",".join(summary.cli_commands) or "<none>",
@@ -373,6 +384,7 @@ def log_registration_summary(
         ",".join(summary.memory_providers) or "<none>",
         ",".join(summary.image_gen_providers) or "<none>",
         ",".join(summary.video_gen_providers) or "<none>",
+        ",".join(summary.capabilities) or "<none>",
     )
 
 
@@ -1858,6 +1870,77 @@ def tool(
 # Registration
 # ---------------------------------------------------------------------------
 
+def _normalized_names(values: Iterable[str], *, label: str) -> frozenset[str]:
+    names: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} must contain only non-empty strings")
+        names.add(value.strip())
+    return frozenset(names)
+
+
+def resolve_capability_selection(
+    available_names: Iterable[str],
+    *,
+    capability_groups: Mapping[str, Iterable[str]],
+    enabled_capabilities: Iterable[str] | None = None,
+    enabled_names: Iterable[str] | None = None,
+) -> CapabilitySelection:
+    """Validate and atomically expand capabilities into registered names.
+
+    Capability and explicit-name selection are mutually exclusive so a
+    deployment cannot accidentally mix an atomic contract with a partial
+    override. When neither is supplied, all available names are selected.
+    """
+    available = _normalized_names(available_names, label="available_names")
+    if enabled_capabilities is not None and enabled_names is not None:
+        raise ValueError(
+            "enabled_capabilities cannot be combined with enabled_names"
+        )
+
+    normalized_groups: dict[str, frozenset[str]] = {}
+    for raw_capability, raw_members in capability_groups.items():
+        if not isinstance(raw_capability, str) or not raw_capability.strip():
+            raise ValueError("capability names must be non-empty strings")
+        capability = raw_capability.strip()
+        members = _normalized_names(
+            raw_members, label=f"capability {capability!r} members"
+        )
+        unknown_members = sorted(members - available)
+        if unknown_members:
+            raise ValueError(
+                f"capability {capability!r} references unknown names: "
+                + ", ".join(unknown_members)
+            )
+        normalized_groups[capability] = members
+
+    if enabled_capabilities is not None:
+        capabilities = _normalized_names(
+            enabled_capabilities, label="enabled_capabilities"
+        )
+        unknown_capabilities = sorted(capabilities - normalized_groups.keys())
+        if unknown_capabilities:
+            raise ValueError(
+                "unknown capabilities: " + ", ".join(unknown_capabilities)
+            )
+        selected = frozenset().union(
+            *(normalized_groups[name] for name in capabilities)
+        )
+        return CapabilitySelection(
+            capabilities=tuple(sorted(capabilities)),
+            names=tuple(sorted(selected)),
+        )
+
+    if enabled_names is not None:
+        selected = _normalized_names(enabled_names, label="enabled_names")
+        unknown_names = sorted(selected - available)
+        if unknown_names:
+            raise ValueError("unknown names: " + ", ".join(unknown_names))
+        return CapabilitySelection(names=tuple(sorted(selected)))
+
+    return CapabilitySelection(names=tuple(sorted(available)))
+
+
 def register_all(ctx: Any, module: Any) -> int:
     """Register every ``@tool`` defined in *module* with *ctx*.
 
@@ -1897,26 +1980,25 @@ def _register_tool(ctx: Any, handler: Callable, spec: dict[str, Any]) -> None:
     )
 
 
-def _register_generation_providers(
+def _validate_generation_providers(
     ctx: Any,
     providers: Iterable[Any],
     *,
     kind: str,
     registrar_name: str,
-) -> list[str]:
+) -> tuple[Callable, tuple[tuple[str, Any], ...]]:
     registrar = getattr(ctx, registrar_name, None)
     if not callable(registrar):
         raise RuntimeError(f"this Hermes plugin context does not support {kind} providers")
-    registered: list[str] = []
+    validated: list[tuple[str, Any]] = []
     for provider in providers:
         name = getattr(provider, "name", None)
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"{kind} providers require a non-empty name")
         if not callable(getattr(provider, "generate", None)):
             raise ValueError(f"{kind} provider {name!r} requires generate()")
-        registrar(provider)
-        registered.append(name)
-    return registered
+        validated.append((name, provider))
+    return registrar, tuple(validated)
 
 
 def register_plugin(
@@ -1927,6 +2009,7 @@ def register_plugin(
     memory_providers: tuple[Any, ...] | list[Any] = (),
     image_gen_providers: tuple[Any, ...] | list[Any] = (),
     video_gen_providers: tuple[Any, ...] | list[Any] = (),
+    capabilities: tuple[str, ...] | list[str] = (),
     plugin_name: str | None = None,
     logger: logging.Logger | None = None,
 ) -> RegistrationSummary:
@@ -1989,6 +2072,9 @@ def register_plugin(
     if not isinstance(resolved_plugin_name, str) or not resolved_plugin_name.strip():
         raise ValueError("plugin_name must be a non-empty string")
     resolved_plugin_name = resolved_plugin_name.strip()
+    resolved_capabilities = tuple(
+        sorted(_normalized_names(capabilities, label="capabilities"))
+    )
 
     slash_commands: dict[str, Callable] = {}
     cli_commands: dict[str, Callable] = {}
@@ -2067,6 +2153,54 @@ def register_plugin(
         )
         skipped_skills.append(name)
 
+    required_registrars = {
+        "register_command": slash_commands,
+        "register_cli_command": cli_commands,
+        "register_tool": tools,
+        "register_middleware": middlewares,
+        "register_hook": hooks,
+        "register_skill": available_skills,
+    }
+    for registrar_name, surfaces in required_registrars.items():
+        if surfaces and not callable(getattr(ctx, registrar_name, None)):
+            raise RuntimeError(
+                f"this Hermes plugin context does not support {registrar_name}()"
+            )
+
+    memory_registrar = getattr(ctx, "register_memory_provider", None)
+    validated_memory_providers: list[tuple[str, Any]] = []
+    if memory_providers and not callable(memory_registrar):
+        raise RuntimeError(
+            "this Hermes plugin context does not support memory providers; "
+            "use the memory-provider discovery path"
+        )
+    for provider in memory_providers:
+        name = getattr(provider, "name", None)
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("memory providers require a non-empty name")
+        validated_memory_providers.append((name, provider))
+
+    image_registrar, validated_image_providers = (
+        _validate_generation_providers(
+            ctx,
+            image_gen_providers,
+            kind="image generation",
+            registrar_name="register_image_gen_provider",
+        )
+        if image_gen_providers
+        else (None, ())
+    )
+    video_registrar, validated_video_providers = (
+        _validate_generation_providers(
+            ctx,
+            video_gen_providers,
+            kind="video generation",
+            registrar_name="register_video_gen_provider",
+        )
+        if video_gen_providers
+        else (None, ())
+    )
+
     registered_slash_commands: list[str] = []
     for name in sorted(slash_commands):
         obj = slash_commands[name]
@@ -2119,31 +2253,18 @@ def register_plugin(
         registered_skills.append(skill.name)
 
     registered_memory_providers: list[str] = []
-    register_memory_provider = getattr(ctx, "register_memory_provider", None)
-    if memory_providers and not callable(register_memory_provider):
-        raise RuntimeError(
-            "this Hermes plugin context does not support memory providers; "
-            "use the memory-provider discovery path"
-        )
-    for provider in memory_providers:
-        name = getattr(provider, "name", None)
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("memory providers require a non-empty name")
-        register_memory_provider(provider)
+    for name, provider in validated_memory_providers:
+        memory_registrar(provider)
         registered_memory_providers.append(name)
 
-    registered_image_gen_providers = _register_generation_providers(
-        ctx,
-        image_gen_providers,
-        kind="image generation",
-        registrar_name="register_image_gen_provider",
-    ) if image_gen_providers else []
-    registered_video_gen_providers = _register_generation_providers(
-        ctx,
-        video_gen_providers,
-        kind="video generation",
-        registrar_name="register_video_gen_provider",
-    ) if video_gen_providers else []
+    registered_image_gen_providers: list[str] = []
+    for name, provider in validated_image_providers:
+        image_registrar(provider)
+        registered_image_gen_providers.append(name)
+    registered_video_gen_providers: list[str] = []
+    for name, provider in validated_video_providers:
+        video_registrar(provider)
+        registered_video_gen_providers.append(name)
 
     summary = RegistrationSummary(
         commands=tuple(registered_slash_commands),
@@ -2156,6 +2277,7 @@ def register_plugin(
         memory_providers=tuple(registered_memory_providers),
         image_gen_providers=tuple(registered_image_gen_providers),
         video_gen_providers=tuple(registered_video_gen_providers),
+        capabilities=resolved_capabilities,
     )
     log_registration_summary(log, resolved_plugin_name, summary)
     return summary

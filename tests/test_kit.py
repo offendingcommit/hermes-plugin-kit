@@ -1319,6 +1319,57 @@ class MediaDeliveryContractTests(unittest.TestCase):
         self.assertIn("telegram:-…0000", encoded)
 
 
+class CapabilitySelectionTests(unittest.TestCase):
+    def test_expands_selected_capabilities_atomically(self) -> None:
+        selection = hpk.resolve_capability_selection(
+            {"image", "video_gen", "video_status", "video_stitch"},
+            enabled_capabilities=("image", "video"),
+            capability_groups={
+                "image": {"image"},
+                "video": {"video_gen", "video_status", "video_stitch"},
+            },
+        )
+
+        self.assertEqual(selection.capabilities, ("image", "video"))
+        self.assertEqual(
+            selection.names,
+            ("image", "video_gen", "video_status", "video_stitch"),
+        )
+
+    def test_rejects_capabilities_and_explicit_names_together(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cannot be combined"):
+            hpk.resolve_capability_selection(
+                {"image"},
+                enabled_capabilities=("image",),
+                enabled_names=("image",),
+                capability_groups={"image": {"image"}},
+            )
+
+    def test_rejects_unknown_capabilities_and_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown capabilities: voice"):
+            hpk.resolve_capability_selection(
+                {"image"},
+                enabled_capabilities=("voice",),
+                capability_groups={"image": {"image"}},
+            )
+        with self.assertRaisesRegex(ValueError, "unknown names: missing"):
+            hpk.resolve_capability_selection(
+                {"image"},
+                enabled_names=("missing",),
+                capability_groups={"image": {"image"}},
+            )
+
+    def test_rejects_invalid_capability_group_members_before_selection(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "capability 'video' references unknown names: video_status"
+        ):
+            hpk.resolve_capability_selection(
+                {"video_gen"},
+                enabled_capabilities=("video",),
+                capability_groups={"video": {"video_gen", "video_status"}},
+            )
+
+
 class RegisterPluginTests(unittest.TestCase):
     def _module(self, **attrs):
         module = types.ModuleType("sample_plugin")
@@ -1502,6 +1553,27 @@ class RegisterPluginTests(unittest.TestCase):
         self.assertEqual(summary.image_gen_providers, ("image",))
         self.assertEqual(summary.video_gen_providers, ("video",))
 
+    def test_preflights_provider_support_before_registering_tools(self) -> None:
+        @hpk.tool(toolset="sample", name="sample_tool")
+        def sample_tool(args, **kwargs):
+            """Sample tool."""
+            return {}
+
+        ctx = FakePluginCtx()
+        ctx.register_video_gen_provider = None
+        video_provider = types.SimpleNamespace(
+            name="video", generate=lambda prompt: prompt
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "does not support video generation"):
+            hpk.register_plugin(
+                ctx,
+                self._module(sample_tool=sample_tool),
+                video_gen_providers=(video_provider,),
+            )
+
+        self.assertEqual(ctx.tools, [])
+
     def test_get_subagent_lifecycle_requires_the_public_service_contract(self) -> None:
         ctx = FakePluginCtx()
         self.assertIs(hpk.get_subagent_lifecycle(ctx), ctx.subagent_lifecycle)
@@ -1519,6 +1591,7 @@ class RegisterPluginTests(unittest.TestCase):
             hooks=("pre_llm_call",),
             skills=("temporal-awareness",),
             skipped_optional_skills=("missing-optional",),
+            capabilities=("image", "video"),
         )
 
         with self.assertLogs(logger, level="INFO") as cap:
@@ -1534,8 +1607,18 @@ class RegisterPluginTests(unittest.TestCase):
             "hooks=pre_llm_call; skills=temporal-awareness; "
             "skipped_optional_skills=missing-optional; "
             "memory_providers=<none>; "
-            "image_gen_providers=<none>; video_gen_providers=<none>",
+            "image_gen_providers=<none>; video_gen_providers=<none>; "
+            "capabilities=image,video",
         )
+
+    def test_register_plugin_reports_selected_capabilities(self) -> None:
+        summary = hpk.register_plugin(
+            FakePluginCtx(),
+            self._module(),
+            capabilities=("video", "image"),
+        )
+
+        self.assertEqual(summary.capabilities, ("image", "video"))
 
     def test_register_plugin_uses_public_registration_summary_logger(self) -> None:
         ctx = FakePluginCtx()

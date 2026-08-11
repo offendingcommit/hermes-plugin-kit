@@ -415,7 +415,8 @@ class HermesContractTests(unittest.TestCase):
                 "hooks=pre_llm_call; skills=probe; "
                 "skipped_optional_skills=<none>; "
                 "memory_providers=<none>; "
-                "image_gen_providers=<none>; video_gen_providers=<none>",
+                "image_gen_providers=<none>; video_gen_providers=<none>; "
+                "capabilities=<none>",
                 cap.records[0].getMessage(),
             )
             self.assertEqual(

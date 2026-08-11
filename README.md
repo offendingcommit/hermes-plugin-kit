@@ -261,6 +261,36 @@ single registration receipt; module registration keeps the existing manifest
 and module-derived defaults. Duplicate detection and returned
 `RegistrationSummary` inventories are identical for both declaration forms.
 
+When a plugin exposes surfaces that must be enabled together, resolve a named
+capability before calling `register_plugin` instead of making every deployment
+copy the capability's members:
+
+```python
+from hermes_plugin_kit import resolve_capability_selection
+
+selection = resolve_capability_selection(
+    TOOLS_BY_NAME,
+    enabled_capabilities=("image", "video"),
+    capability_groups={
+        "image": {"image_generate"},
+        "video": {"video_generate", "video_status", "video_cancel"},
+    },
+)
+return register_plugin(
+    ctx,
+    (TOOLS_BY_NAME[name] for name in selection.names),
+    capabilities=selection.capabilities,
+    plugin_name="media",
+)
+```
+
+Capability selection and explicit-name selection are mutually exclusive.
+Unknown capabilities, unknown explicit names, and capability groups that refer
+to undeclared names fail before registration begins. The selected capability
+names are included in the lifecycle receipt. `register_plugin` also preflights
+the required context registrars and specialized providers before registering
+any surface, so an unsupported host cannot leave a partially registered plugin.
+
 `@command` requires a bare lowercase kebab-case name. Slash commands are the
 backward-compatible default: the handler receives trailing command text
 unchanged and may return `str | None` synchronously or asynchronously. The

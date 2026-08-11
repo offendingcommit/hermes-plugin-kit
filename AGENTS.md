@@ -29,6 +29,11 @@ plugin.
   `register_plugin` with an explicit receipt identity. Iterable registration
   must retain module registration's duplicate checks, deterministic ordering,
   skills, and `RegistrationSummary` contract.
+- Use `resolve_capability_selection` when several runtime-gated surfaces form
+  one authorization unit. Capability membership belongs to the plugin, not
+  deployment configuration; explicit-name selection remains mutually exclusive
+  for narrow legacy surfaces. Registration preflight must finish before the
+  first `ctx.register_*` mutation, and receipts must name selected capabilities.
 - Consumer plugins must pin this package to an immutable commit, not a moving
   branch. Profiles that install multiple plugins into one Python environment
   must keep every consumer on the same kit revision.
