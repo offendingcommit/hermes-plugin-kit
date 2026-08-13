@@ -181,6 +181,38 @@ def _call_session_db(
     return method(*args, **kwargs)
 
 
+def _call_session_db_evolving(
+    db: Any,
+    method_name: str,
+    *args: Any,
+    optional_defaults: dict[str, Any],
+    **kwargs: Any,
+) -> Any:
+    """Call an evolving Hermes API without forwarding absent optional features."""
+    method = _session_db_method(db, method_name)
+    try:
+        signature = inspect.signature(method)
+    except (TypeError, ValueError) as exc:
+        raise SessionDBCompatibilityError(
+            f"hermes-agent SessionDB is incompatible: cannot inspect public method {method_name}()"
+        ) from exc
+    accepted = set(signature.parameters)
+    accepts_kwargs = any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+    forwarded: dict[str, Any] = {}
+    for name, value in kwargs.items():
+        if name in accepted or accepts_kwargs:
+            forwarded[name] = value
+        elif name not in optional_defaults or value != optional_defaults[name]:
+            raise SessionDBCompatibilityError(
+                "hermes-agent SessionDB is incompatible: public method "
+                f"{method_name}() does not accept requested argument {name}={value!r}"
+            )
+    return _call_session_db(db, method_name, *args, **forwarded)
+
+
 @contextmanager
 def open_session_db(
     db_path: str | Path | None = None,
@@ -250,9 +282,28 @@ def list_sessions(
     session_key: str | None = None,
 ) -> list[dict[str, Any]]:
     """List rich session rows using Hermes-supported filters and pagination."""
-    return _call_session_db(
+    return _call_session_db_evolving(
         db,
         "list_sessions_rich",
+        optional_defaults={
+            "source": None,
+            "sources": None,
+            "exclude_sources": None,
+            "cwd_prefix": None,
+            "limit": 20,
+            "offset": 0,
+            "include_children": False,
+            "min_message_count": 0,
+            "project_compression_tips": True,
+            "order_by_last_active": False,
+            "include_archived": False,
+            "archived_only": False,
+            "id_query": None,
+            "search_query": None,
+            "compact_rows": False,
+            "include_pinned": False,
+            "session_key": None,
+        },
         source=source,
         sources=sources,
         exclude_sources=exclude_sources,
@@ -284,10 +335,17 @@ def read_session_messages(
     after_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Read a session transcript using Hermes' ordering and paging rules."""
-    return _call_session_db(
+    return _call_session_db_evolving(
         db,
         "get_messages",
         session_id,
+        optional_defaults={
+            "include_inactive": False,
+            "limit": None,
+            "offset": 0,
+            "latest": False,
+            "after_id": None,
+        },
         include_inactive=include_inactive,
         limit=limit,
         offset=offset,

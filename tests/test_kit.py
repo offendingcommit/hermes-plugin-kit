@@ -123,9 +123,24 @@ class SessionDBHelperTests(unittest.TestCase):
         db = types.SimpleNamespace(get_messages=lambda session_id: [])
         with self.assertRaisesRegex(
             hpk.SessionDBCompatibilityError,
-            r"get_messages\(\) does not accept the required arguments",
+            r"get_messages\(\) does not accept requested argument limit=1",
         ):
             hpk.read_session_messages(db, "s1", limit=1)
+
+    def test_older_public_signature_ignores_default_newer_options(self) -> None:
+        calls = []
+
+        def get_messages(session_id, include_inactive=False, limit=None, offset=0):
+            calls.append((session_id, include_inactive, limit, offset))
+            return []
+
+        db = types.SimpleNamespace(get_messages=get_messages)
+        self.assertEqual(hpk.read_session_messages(db, "s1"), [])
+        self.assertEqual(calls, [("s1", False, None, 0)])
+        with self.assertRaisesRegex(
+            hpk.SessionDBCompatibilityError, "does not accept requested argument latest=True"
+        ):
+            hpk.read_session_messages(db, "s1", latest=True)
 
     def test_missing_hermes_import_has_instructive_error(self) -> None:
         real_import = __import__

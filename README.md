@@ -440,6 +440,9 @@ live `~/.hermes/state.db`. Production helpers issue no raw SQL and delegate
 ordering, pagination, structured message encoding, locking, and migration to
 Hermes itself. An incompatible Hermes build raises
 `SessionDBCompatibilityError` naming the missing contract.
+Default-valued options added by newer Hermes releases are omitted when an
+older public method signature does not accept them. Requesting a non-default
+option that the running Hermes does not support still fails explicitly.
 
 ## Calling host-managed capabilities
 
