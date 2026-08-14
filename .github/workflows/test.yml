@@ -16,12 +16,34 @@ jobs:
       - name: Run unittest suite
         run: make test
 
-  # Validate the kit against the *real* hermes-agent source so it can't silently
-  # drift from upstream. Checks out NousResearch/hermes-agent and points the
-  # contract tests at it; explicit checkout import or layout drift fails this
-  # job so an upstream contract break cannot become a misleading skipped green.
+  # Amber admission gates on the exact deployed Hermes fork contract. Keep the
+  # immutable revision aligned with infra's candidate image/source receipt.
+  hermes-deployed-context-engine-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: offendingcommit/hermes-agent
+          ref: d3b1cfe9a80531e0682b1e66752e04cea29d5d4a
+          path: .hermes-agent-deployed
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Run context-engine contract against deployed Hermes revision
+        env:
+          HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent-deployed
+        run: |
+          test "$(git -C "$HERMES_AGENT_PATH" rev-parse HEAD)" = \
+            "d3b1cfe9a80531e0682b1e66752e04cea29d5d4a"
+          uv run python -m unittest tests.test_context_engine_contract -v
+
+  # Track forward drift against upstream main without making Amber depend on
+  # APIs that are newer than its exact deployed host.
   hermes-contract:
     runs-on: ubuntu-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6

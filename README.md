@@ -9,8 +9,9 @@
 [hermes-agent](https://github.com/NousResearch/hermes-agent). Decorate an
 in-session slash command or terminal CLI subcommand with `@command`, a tool
 with `@tool`, or a lifecycle callback with `@middleware` or `@hook`, then use
-`register_plugin` to register commands, tools, middleware, hooks, and
-plugin-owned skills together. Existing tool-only plugins can keep using
+`register_plugin` to register commands, tools, middleware, hooks, plugin-owned
+skills, and an optional Hermes context-engine instance together. Existing
+tool-only plugins can keep using
 `register_all` for backward compatibility, but new and migrated plugins should
 use `register_plugin` so every surface and the lifecycle receipt share one
 contract. The LLM-facing schema, argument validation, structured logging, and
@@ -260,6 +261,30 @@ decorated callables. Explicit `plugin_name` and `logger` values control the
 single registration receipt; module registration keeps the existing manifest
 and module-derived defaults. Duplicate detection and returned
 `RegistrationSummary` inventories are identical for both declaration forms.
+
+Hermes context engines use a singular native registration path:
+
+```python
+return register_plugin(
+    ctx,
+    (),
+    context_engine=ContinuityEngine(config),
+    plugin_name="continuity",
+)
+```
+
+The kit preflights `ctx.register_context_engine`, the engine's non-empty
+`name`, and the real `agent.context_engine.ContextEngine` type before mutating
+any host registry. An affirmative host result is reported as `accepted`; older
+hosts that return no result are truthfully reported as `declared/submitted`.
+An explicit rejection—most commonly a second engine—fails registration before
+tools, hooks, skills, or providers are registered.
+
+Context-engine recovery operations are native engine tools. Declare their
+schemas through `ContextEngine.get_tool_schemas()` and dispatch them through
+`handle_tool_call()`. Do **not** duplicate them with `@tool`: ordinary plugin
+registration would shadow Hermes' engine dispatch, which supplies the active
+message context and other engine lifecycle state.
 
 When a plugin exposes surfaces that must be enabled together, resolve a named
 capability before calling `register_plugin` instead of making every deployment
@@ -534,6 +559,10 @@ Image and video providers run through the general `PluginContext`. The kit does
 not decorate provider methods or replace the `MemoryProvider`,
 `ImageGenProvider`, or `VideoGenProvider` contracts.
 
+Context engines likewise remain instances of Hermes' `ContextEngine` ABC, but
+are singular rather than a provider collection. Their native schemas and
+`handle_tool_call` own recovery-tool dispatch.
+
 The ordinary path remains Hermes' host-managed `send_message`. Because that
 host contract does not currently expose Telegram's `has_spoiler`, only
 `spoiler=True` uses the kit's narrow Telegram extension. The extension accepts
@@ -608,7 +637,7 @@ include:
 - `INFO`: a registration summary from `register_all`, including count and names.
 - `INFO`: one stable lifecycle receipt from `register_plugin`, including the
   plugin name and actual command, tool, middleware, hook, skill, and skipped
-  optional skill names.
+  optional skill names, plus the context-engine name and registration state.
 
 The kit never logs handler result payloads. Keys containing `token`, `secret`,
 `password`, `passwd`, `api_key`, `apikey`, or `auth` are replaced with `***` at

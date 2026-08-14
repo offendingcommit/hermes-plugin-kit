@@ -18,6 +18,7 @@ and set it); locally it discovers ``~/hermes-agent`` automatically.
 from __future__ import annotations
 
 import argparse
+import copy
 import inspect
 import json
 import os
@@ -64,6 +65,7 @@ def _import_real_hermes():
         )
         from tools.registry import registry  # type: ignore
         from hermes_state import SCHEMA_VERSION, SessionDB  # type: ignore
+        from agent.context_engine import ContextEngine  # type: ignore
 
         # A stale checkout that predates plugin-owned skills is not the
         # lifecycle contract this suite is intended to certify.
@@ -102,6 +104,7 @@ def _import_real_hermes():
             registry=registry,
             SCHEMA_VERSION=SCHEMA_VERSION,
             SessionDB=SessionDB,
+            ContextEngine=ContextEngine,
         )
 
     try:
@@ -424,6 +427,60 @@ class HermesContractTests(unittest.TestCase):
                 [{"context": "gateway-shaped"}],
             )
             self.assertEqual(manager.find_plugin_skill("contract-plugin:probe"), path)
+
+    def test_context_engine_registers_singleton_and_deep_copies_without_tool_duplication(self) -> None:
+        class ContractEngine(_REAL.ContextEngine):
+            @property
+            def name(self):
+                return "continuity-contract"
+
+            def update_from_response(self, usage):
+                self.last_total_tokens = usage.get("total_tokens", 0)
+
+            def should_compress(self, prompt_tokens=None):
+                return False
+
+            def compress(self, messages, **kwargs):
+                return messages
+
+            def get_tool_schemas(self):
+                return [
+                    {
+                        "name": "continuity_recover",
+                        "description": "Recover bounded context.",
+                        "parameters": {"type": "object", "properties": {}},
+                    }
+                ]
+
+            def handle_tool_call(self, name, args, **kwargs):
+                return json.dumps({"name": name})
+
+        manager = _REAL.PluginManager()
+        manifest = _REAL.PluginManifest(name="contract-plugin")
+        ctx = _REAL.PluginContext(manifest, manager)
+        engine = ContractEngine()
+
+        summary = hpk.register_plugin(ctx, (), context_engine=engine)
+
+        self.assertIs(manager._context_engine, engine)
+        self.assertEqual(summary.context_engine, "continuity-contract")
+        # Upstream main still returns None after accepting the engine, while
+        # the deployed continuity host returns True. The receipt must remain
+        # truthful across both contracts.
+        self.assertIn(summary.context_engine_registration, {"accepted", "declared/submitted"})
+        activated = copy.deepcopy(manager._context_engine)
+        self.assertIsNot(activated, engine)
+        self.assertEqual(activated.name, engine.name)
+        self.assertNotIn("continuity_recover", manager._plugin_tool_names)
+
+        second = ContractEngine()
+        if summary.context_engine_registration == "accepted":
+            with self.assertRaisesRegex(RuntimeError, "context engine.*registered"):
+                hpk.register_plugin(ctx, (), context_engine=second)
+        else:
+            second_summary = hpk.register_plugin(ctx, (), context_engine=second)
+            self.assertEqual(second_summary.context_engine_registration, "declared/submitted")
+        self.assertIs(manager._context_engine, engine)
 
     def test_command_registers_and_dispatches_through_real_plugin_context(self) -> None:
         manager = _REAL.PluginManager()

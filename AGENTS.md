@@ -65,6 +65,11 @@ plugin.
 - Keep stateful Hermes provider ABCs as provider instances: register memory,
   image-generation, and video-generation providers through their specialized
   contexts instead of decorating provider methods as general plugin surfaces.
+- Register at most one real Hermes `ContextEngine` through `register_plugin`.
+  Finish every registrar, identity, type, declaration, and provider preflight
+  before submitting it or mutating another host registry. Keep engine schemas
+  and recovery dispatch on `get_tool_schemas` / `handle_tool_call`; do not
+  duplicate native engine tools through `@tool`.
 - Redact secret-looking values in logs and avoid logging full untrusted payloads.
 - Use `uv` and the Makefile for local development:
   `make install`, `make test`, `make test-one T=tests.test_kit.SchemaConventionTests`,

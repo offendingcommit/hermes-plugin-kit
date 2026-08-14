@@ -28,12 +28,14 @@ guidance, not a second implementation specification.
 | Request or execution middleware | `@middleware`, `MiddlewareKind` | `register_plugin` | Callback is synchronous; request phases replace payloads, execution phases call single-use `next_call`. |
 | Lifecycle hook | `@hook` | `register_plugin` | Hermes kwargs and return values pass through; exceptions are re-raised for Hermes isolation. |
 | Plugin-owned skill | `plugin_skill` | `register_plugin(..., skills=...)` | Hermes adds the plugin namespace; missing required skills fail, optional skills warn and skip. |
+| Context engine | Hermes `ContextEngine` instance | `register_plugin(..., context_engine=...)` | Singular native engine registration; schemas and recovery dispatch stay in `get_tool_schemas()` / `handle_tool_call()`, never duplicated with `@tool`. |
 | Host-managed call | `invoke_host_tool` | None | Use for supported non-registry capabilities such as `send_message`; pre/post-tool hooks remain active. |
 | Local media delivery | `MediaPayload`, `MediaType`, `deliver_media` | Consumer registers suppression hooks | File must be absolute, present, and non-empty; `origin` resolves from task-local Hermes context. |
 | Correlated lifecycle receipt | `ObservabilityEvent`, `log_observability_event`, `new_correlation_id`, `credential_identity_hash` | None | Emits bounded, redacted JSON through the supplied local logger; consumers provide domain stages and never place credentials in event fields. |
 
-`RegistrationSummary` reports commands, tools, middleware, hooks, skills, and
-skipped optional skills registered by `register_plugin`.
+`RegistrationSummary` reports commands, tools, middleware, hooks, skills,
+skipped optional skills, and the declared context engine plus its truthful host
+registration state.
 
 ## What The Kit Owns
 
@@ -54,8 +56,10 @@ Use the direct Hermes API or the specialized upstream plugin interface for:
 - `ctx.register_cli_command`, `ctx.dispatch_tool`, `ctx.inject_message`, or
   `ctx.llm.complete*`.
 - Gateway platform adapters.
-- Memory, context-engine, model, image, video, browser, web-search, secret
-  source, desktop, or dashboard provider interfaces.
+- Memory, model, image, video, browser, web-search, secret source, desktop, or
+  dashboard provider interfaces. The one supported context-engine seam is the
+  singular typed `register_plugin` adapter; the kit does not abstract engine
+  policy, schemas, or tool dispatch.
 - Plugin discovery, enablement, platform toolset selection, or core agent-loop behavior.
 
 Do not add a kit abstraction merely to hide one direct `PluginContext` call.
@@ -73,6 +77,10 @@ making structurally impossible.
    commands, middleware, hooks, or plugin skills.
 5. Keep `plugin.yaml`, auth gates, toolsets, docs, and registration tests in parity.
 6. Run the consumer suite and a real Hermes contract test when runtime APIs matter.
+
+For a context-engine consumer, pass exactly one real `ContextEngine` instance.
+Keep recovery operations on the native engine schema/handler path; decorating
+the same operations with `@tool` shadows the active-context-aware dispatch.
 
 ## Failure Traps
 

@@ -416,6 +416,8 @@ class RegistrationSummary:
     video_gen_providers: tuple[str, ...] = ()
     cli_commands: tuple[str, ...] = ()
     capabilities: tuple[str, ...] = ()
+    context_engine: str | None = None
+    context_engine_registration: str | None = None
 
 
 class CommandType(str, Enum):
@@ -441,7 +443,8 @@ def log_registration_summary(
         "commands=%s; cli_commands=%s; tools=%s; middlewares=%s; hooks=%s; "
         "skills=%s; skipped_optional_skills=%s; memory_providers=%s; "
         "image_gen_providers=%s; "
-        "video_gen_providers=%s; capabilities=%s",
+        "video_gen_providers=%s; capabilities=%s; context_engine=%s; "
+        "context_engine_registration=%s",
         clean_plugin_name,
         ",".join(summary.commands) or "<none>",
         ",".join(summary.cli_commands) or "<none>",
@@ -454,6 +457,8 @@ def log_registration_summary(
         ",".join(summary.image_gen_providers) or "<none>",
         ",".join(summary.video_gen_providers) or "<none>",
         ",".join(summary.capabilities) or "<none>",
+        summary.context_engine or "<none>",
+        summary.context_engine_registration or "<none>",
     )
 
 
@@ -2078,6 +2083,7 @@ def register_plugin(
     memory_providers: tuple[Any, ...] | list[Any] = (),
     image_gen_providers: tuple[Any, ...] | list[Any] = (),
     video_gen_providers: tuple[Any, ...] | list[Any] = (),
+    context_engine: Any | None = None,
     capabilities: tuple[str, ...] | list[str] = (),
     plugin_name: str | None = None,
     logger: logging.Logger | None = None,
@@ -2090,6 +2096,8 @@ def register_plugin(
     Pass a module (or loaded module name) to discover all declarations, or an
     iterable of decorated callables to register only a runtime-active subset.
     Provider instances retain their Hermes ABC contracts and are not decorated.
+    A context engine retains Hermes' native schema and dispatch path; it is not
+    translated into kit-decorated tools.
     """
     if isinstance(module, str):
         module = sys.modules[module]
@@ -2270,6 +2278,41 @@ def register_plugin(
         else (None, ())
     )
 
+    context_engine_registrar = None
+    context_engine_name = None
+    if context_engine is not None:
+        context_engine_registrar = getattr(ctx, "register_context_engine", None)
+        if not callable(context_engine_registrar):
+            raise RuntimeError(
+                "this Hermes plugin context does not support register_context_engine()"
+            )
+        context_engine_name = getattr(context_engine, "name", None)
+        if not isinstance(context_engine_name, str) or not context_engine_name.strip():
+            raise ValueError("context engine requires a non-empty name")
+        context_engine_name = context_engine_name.strip()
+        try:
+            from agent.context_engine import ContextEngine
+        except (ImportError, AttributeError) as exc:
+            raise RuntimeError(
+                "hermes-agent ContextEngine is unavailable; context engine registration refused"
+            ) from exc
+        if not isinstance(context_engine, ContextEngine):
+            raise TypeError(
+                "context_engine must be an instance of agent.context_engine.ContextEngine"
+            )
+
+    context_engine_registration = None
+    if context_engine_registrar is not None:
+        registration_result = context_engine_registrar(context_engine)
+        if registration_result is False:
+            raise RuntimeError(
+                f"Hermes rejected context engine {context_engine_name!r}; "
+                "only one context engine may be registered"
+            )
+        context_engine_registration = (
+            "accepted" if registration_result is True else "declared/submitted"
+        )
+
     registered_slash_commands: list[str] = []
     for name in sorted(slash_commands):
         obj = slash_commands[name]
@@ -2347,6 +2390,8 @@ def register_plugin(
         image_gen_providers=tuple(registered_image_gen_providers),
         video_gen_providers=tuple(registered_video_gen_providers),
         capabilities=resolved_capabilities,
+        context_engine=context_engine_name,
+        context_engine_registration=context_engine_registration,
     )
     log_registration_summary(log, resolved_plugin_name, summary)
     return summary
