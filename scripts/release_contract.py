@@ -14,7 +14,7 @@ import tomllib
 import zipfile
 from dataclasses import dataclass
 from email.parser import Parser
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable, Sequence
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -206,9 +206,17 @@ def _metadata_from_wheel(path: Path) -> tuple[str, str]:
 
 def _metadata_from_sdist(path: Path) -> tuple[str, str]:
     with tarfile.open(path, mode="r:gz") as archive:
-        package_info = [member for member in archive.getmembers() if member.name.endswith("/PKG-INFO")]
+        package_info = [
+            member
+            for member in archive.getmembers()
+            if member.isfile()
+            and len(PurePosixPath(member.name).parts) == 2
+            and PurePosixPath(member.name).name == "PKG-INFO"
+        ]
         if len(package_info) != 1:
-            raise ReleaseContractError(f"{path.name} must contain exactly one PKG-INFO file")
+            raise ReleaseContractError(
+                f"{path.name} must contain exactly one top-level PKG-INFO file"
+            )
         extracted = archive.extractfile(package_info[0])
         if extracted is None:
             raise ReleaseContractError(f"cannot read metadata from {path.name}")

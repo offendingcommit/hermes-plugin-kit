@@ -146,6 +146,10 @@ class ReleaseReceiptTests(unittest.TestCase):
         sdist = directory / f"{source_root}.tar.gz"
         with tarfile.open(sdist, "w:gz") as archive:
             archive.add(package_info, arcname=f"{source_root}/PKG-INFO")
+            archive.add(
+                package_info,
+                arcname=f"{source_root}/hermes_plugin_kit.egg-info/PKG-INFO",
+            )
         package_info.unlink()
 
     def _create(self, dist: Path, output: Path, *, previous: str = "0.7.0") -> dict:
