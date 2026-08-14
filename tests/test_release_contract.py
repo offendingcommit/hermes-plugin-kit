@@ -435,12 +435,50 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         cls.test_workflow = (ROOT / ".github/workflows/test.yml").read_text(
             encoding="utf-8"
         )
+        cls.justfile = (ROOT / "justfile").read_text(encoding="utf-8")
         cls.release_config = yaml.load(cls.workflow, Loader=yaml.BaseLoader)
 
     def test_release_is_materialized_without_push_or_vcs_release(self) -> None:
         self.assertIn("semantic-release --strict version --no-push --no-vcs-release", self.workflow)
         self.assertIn("release-source.bundle", self.workflow)
         self.assertIn("git push --atomic origin", self.workflow)
+
+    def test_materialize_attaches_exact_trigger_sha_to_main_before_release(self) -> None:
+        steps = self.release_config["jobs"]["materialize"]["steps"]
+        checkout_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step["name"] == "Check out the triggering main revision"
+        )
+        intent_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step["name"] == "Validate the tagged baseline and strict release intent"
+        )
+        attach_steps = [
+            (index, step)
+            for index, step in enumerate(steps)
+            if step["name"] == "Attach the exact trigger to local main"
+        ]
+
+        self.assertEqual(len(attach_steps), 1)
+        attach_index, attach = attach_steps[0]
+        self.assertLess(checkout_index, attach_index)
+        self.assertLess(attach_index, intent_index)
+        self.assertEqual(attach["env"]["EXPECTED_SHA"], "${{ github.sha }}")
+        self.assertEqual(attach["run"], "just release-attach-trigger")
+        self.assertIn("release-attach-trigger:", self.justfile)
+        self.assertIn('test "$GITHUB_REF" = "refs/heads/main"', self.justfile)
+        self.assertEqual(
+            self.justfile.count(
+                'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"'
+            ),
+            2,
+        )
+        self.assertIn(
+            'git switch --force-create main "$EXPECTED_SHA"', self.justfile
+        )
+        self.assertIn('test "$(git branch --show-current)" = "main"', self.justfile)
 
     def test_exact_release_source_is_tested_and_built_once_in_isolated_jobs(self) -> None:
         jobs = self.release_config["jobs"]

@@ -24,6 +24,17 @@ test-one test_name:
 test-release:
     {{ uv }} run python -m unittest tests.test_release_contract -v
 
+# Attach an immutable CI trigger to the branch semantic-release matches.
+[private]
+release-attach-trigger:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test "$GITHUB_REF" = "refs/heads/main"
+    test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+    git switch --force-create main "$EXPECTED_SHA"
+    test "$(git branch --show-current)" = "main"
+    test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
 # Prepare a local Hermes checkout unless the caller supplied one.
 [private]
 prepare-hermes-agent:
