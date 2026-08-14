@@ -741,14 +741,23 @@ commits do not release by themselves; an invalid commit in release history
 fails closed. Major releases are published but their receipt is always
 `manual_migration_required`, never an automatic promotion candidate.
 
-The workflow first creates the version/CHANGELOG commit and tag locally. It
-tests that exact final SHA with the unit and real-Hermes contract suites, builds
-the wheel and sdist once, validates their metadata, and records their filenames
-and SHA-256 values. Only then may a narrow write job atomically push that tested
-commit and tag. A separate `pypi` environment publishes the uploaded artifacts
-through OIDC Trusted Publishing; no password or API token is used. The GitHub
-Release and its JSON receipt are created only after PyPI succeeds. A failed
-publish is retried from the retained workflow artifact and must not rebuild it.
+The workflow first creates the version/CHANGELOG commit and tag locally, then
+bundles that exact final source before executing tests. Fresh, separate jobs
+restore the bundle for unit/public tests, the mutable upstream-Hermes contract,
+and the one artifact build. The build job is gated on both test jobs and never
+checks out or executes Hermes code. Every lane verifies the release SHA, tag,
+parent, and clean tracked source before continuing.
+
+The build produces the wheel and sdist once, validates their metadata, and
+writes a prepublication manifest containing their filenames, sizes, and SHA-256
+values. Only then may the protected source-promotion job atomically push that
+tested commit and tag. A separate `pypi` environment publishes the uploaded
+artifacts through OIDC Trusted Publishing; no password or API token is used.
+After publication, the workflow downloads and hashes the registry files and
+turns the manifest into the final receipt by adding each verified direct
+`https://files.pythonhosted.org/` URL. The immutable GitHub Release uploads that
+final receipt only after PyPI verification. A failed publish is retried from
+the retained workflow artifact and must not rebuild it.
 
 Release automation is deliberately disarmed unless the repository variable
 `SEMANTIC_RELEASE_ENABLED` is exactly `true`. Set it only after all activation
@@ -758,15 +767,32 @@ prerequisites have been reviewed:
   `offendingcommit/hermes-plugin-kit`, workflow `release.yml`, and environment
   `pypi`;
 - the protected GitHub environment is named exactly `pypi`;
-- the `main` ruleset requires the ordinary test workflow and permits only the
-  guarded Semantic Release source-promotion job to advance the release commit;
+- GitHub immutable releases are enabled for the repository; the workflow
+  verifies the repository control with Administration-read permission after a
+  release intent is materialized but before source promotion, and verifies
+  `isImmutable` after publication. Non-releasing commits never enter a
+  protected environment;
+- a protected environment named exactly `source-promotion` contains variable
+  `SOURCE_PROMOTION_APP_CLIENT_ID` and secret
+  `SOURCE_PROMOTION_APP_PRIVATE_KEY` for a dedicated GitHub App installed only
+  on this repository. The App has repository Administration read and Contents
+  write permissions; no PAT is used;
+- the `main` ruleset requires the ordinary test workflow and names that
+  dedicated GitHub App as its sole source-promotion bypass actor. Generic
+  Actions credentials and the default `GITHUB_TOKEN` must not bypass it;
 - the existing `0.7.0` source baseline has a reviewed immutable `v0.7.0` tag.
 
-The repository currently creates none of those external controls itself. A
-missing switch, PyPI project, baseline tag, test, build, metadata check, source
-identity, or artifact hash stops before publication. The release receipt is the
-discoverable boundary for downstream qualification; polling and recovery from
-a missed notification belong to that downstream system.
+This change does not create or mutate any of those external controls. At review
+time immutable releases were disabled, the required environments/ruleset/App
+were not configured, and the PyPI project did not yet exist; a pending Trusted
+Publisher supports that first OIDC publication. Keep
+`SEMANTIC_RELEASE_ENABLED` unset until the full checklist is configured and a
+generic-token rejection plus dedicated-App promotion have been exercised in an
+isolated validation. A missing switch, control, baseline tag, test, build,
+metadata check, source identity, or artifact hash stops before publication. The
+final release receipt is the discoverable boundary for downstream
+qualification; polling and recovery from a missed notification belong to that
+downstream system.
 
 ## License
 

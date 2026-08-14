@@ -14,11 +14,13 @@ import yaml
 from scripts.release_contract import (
     ReleaseContractError,
     classify_commit_messages,
-    create_release_receipt,
+    create_release_manifest,
+    finalize_release_receipt,
     validate_conventional_history,
     validate_release_baseline,
+    verify_final_release_receipt,
     verify_pypi_release,
-    verify_release_receipt,
+    verify_release_manifest,
 )
 
 
@@ -147,7 +149,7 @@ class ReleaseReceiptTests(unittest.TestCase):
         package_info.unlink()
 
     def _create(self, dist: Path, output: Path, *, previous: str = "0.7.0") -> dict:
-        return create_release_receipt(
+        return create_release_manifest(
             previous_version=previous,
             version=self.VERSION,
             tag=f"v{self.VERSION}",
@@ -159,6 +161,23 @@ class ReleaseReceiptTests(unittest.TestCase):
             artifact_dir=dist,
             output_path=output,
         )
+
+    def _pypi_release(self, receipt: dict, dist: Path) -> tuple[dict, dict[str, bytes]]:
+        urls = []
+        payloads = {}
+        for artifact in receipt["artifacts"]:
+            filename = artifact["filename"]
+            url = f"https://files.pythonhosted.org/packages/release/{filename}"
+            payloads[url] = (dist / filename).read_bytes()
+            urls.append(
+                {
+                    "filename": filename,
+                    "digests": {"sha256": artifact["sha256"]},
+                    "url": url,
+                    "yanked": False,
+                }
+            )
+        return {"info": {"version": self.VERSION}, "urls": urls}, payloads
 
     def test_receipt_binds_artifact_metadata_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -197,7 +216,10 @@ class ReleaseReceiptTests(unittest.TestCase):
                 self.assertEqual(receipt["evidence"][gate]["source_sha"], self.SOURCE_SHA)
                 self.assertEqual(receipt["evidence"][gate]["result"], "passed")
                 self.assertTrue(receipt["evidence"][gate]["command"])
-            self.assertEqual(verify_release_receipt(root / "release-receipt.json", dist), receipt)
+            self.assertEqual(receipt["receipt_state"], "prepublication")
+            self.assertEqual(
+                verify_release_manifest(root / "release-receipt.json", dist), receipt
+            )
 
     def test_hash_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -211,7 +233,7 @@ class ReleaseReceiptTests(unittest.TestCase):
             artifact.write_bytes(artifact.read_bytes() + b"tampered")
 
             with self.assertRaisesRegex(ReleaseContractError, "SHA-256 mismatch"):
-                verify_release_receipt(receipt_path, dist)
+                verify_release_manifest(receipt_path, dist)
 
     def test_major_receipt_is_never_automatic_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -220,7 +242,7 @@ class ReleaseReceiptTests(unittest.TestCase):
             dist.mkdir()
             self._write_dist(dist, version="1.0.0")
 
-            receipt = create_release_receipt(
+            receipt = create_release_manifest(
                 previous_version="0.7.0",
                 version="1.0.0",
                 tag="v1.0.0",
@@ -260,21 +282,7 @@ class ReleaseReceiptTests(unittest.TestCase):
             self._write_dist(dist)
             receipt_path = root / "release-receipt.json"
             receipt = self._create(dist, receipt_path)
-            urls = []
-            payloads = {}
-            for artifact in receipt["artifacts"]:
-                filename = artifact["filename"]
-                url = f"https://files.pythonhosted.org/packages/release/{filename}"
-                payloads[url] = (dist / filename).read_bytes()
-                urls.append(
-                    {
-                        "filename": filename,
-                        "digests": {"sha256": artifact["sha256"]},
-                        "url": url,
-                        "yanked": False,
-                    }
-                )
-            metadata = {"info": {"version": self.VERSION}, "urls": urls}
+            metadata, payloads = self._pypi_release(receipt, dist)
 
             result = verify_pypi_release(
                 receipt_path,
@@ -283,6 +291,96 @@ class ReleaseReceiptTests(unittest.TestCase):
             )
 
             self.assertEqual(result, metadata)
+
+    def test_verified_pypi_urls_round_trip_into_final_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dist = root / "dist"
+            dist.mkdir()
+            self._write_dist(dist)
+            manifest_path = root / "release-manifest.json"
+            manifest = self._create(dist, manifest_path)
+            metadata, payloads = self._pypi_release(manifest, dist)
+            receipt_path = root / "release-receipt.json"
+
+            receipt = finalize_release_receipt(
+                manifest_path,
+                receipt_path,
+                fetch_json=lambda _url: metadata,
+                fetch_bytes=payloads.__getitem__,
+            )
+
+            self.assertEqual(receipt["receipt_state"], "published")
+            self.assertEqual(
+                receipt,
+                json.loads(receipt_path.read_text(encoding="utf-8")),
+            )
+            verified = verify_final_release_receipt(receipt_path)
+            self.assertEqual(verified, receipt)
+            for artifact in receipt["artifacts"]:
+                self.assertEqual(artifact["size"], len(payloads[artifact["url"]]))
+                self.assertTrue(
+                    artifact["url"].startswith("https://files.pythonhosted.org/")
+                )
+
+    def test_yanked_pypi_file_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dist = root / "dist"
+            dist.mkdir()
+            self._write_dist(dist)
+            manifest_path = root / "release-manifest.json"
+            manifest = self._create(dist, manifest_path)
+            metadata, payloads = self._pypi_release(manifest, dist)
+            metadata["urls"][0]["yanked"] = True
+
+            with self.assertRaisesRegex(ReleaseContractError, "is yanked"):
+                verify_pypi_release(
+                    manifest_path,
+                    fetch_json=lambda _url: metadata,
+                    fetch_bytes=payloads.__getitem__,
+                )
+
+    def test_pypi_metadata_digest_mismatch_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dist = root / "dist"
+            dist.mkdir()
+            self._write_dist(dist)
+            manifest_path = root / "release-manifest.json"
+            manifest = self._create(dist, manifest_path)
+            metadata, payloads = self._pypi_release(manifest, dist)
+            metadata["urls"][0]["digests"]["sha256"] = "0" * 64
+
+            with self.assertRaisesRegex(ReleaseContractError, "PyPI SHA-256 mismatch"):
+                verify_pypi_release(
+                    manifest_path,
+                    fetch_json=lambda _url: metadata,
+                    fetch_bytes=payloads.__getitem__,
+                )
+
+    def test_non_pythonhosted_artifact_url_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dist = root / "dist"
+            dist.mkdir()
+            self._write_dist(dist)
+            manifest_path = root / "release-manifest.json"
+            manifest = self._create(dist, manifest_path)
+            metadata, payloads = self._pypi_release(manifest, dist)
+            original_url = metadata["urls"][0]["url"]
+            invalid_url = original_url.replace(
+                "files.pythonhosted.org", "downloads.example.invalid"
+            )
+            metadata["urls"][0]["url"] = invalid_url
+            payloads[invalid_url] = payloads[original_url]
+
+            with self.assertRaisesRegex(ReleaseContractError, "unexpected PyPI artifact URL"):
+                verify_pypi_release(
+                    manifest_path,
+                    fetch_json=lambda _url: metadata,
+                    fetch_bytes=payloads.__getitem__,
+                )
 
     def test_pypi_download_hash_mismatch_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -331,8 +429,26 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("release-source.bundle", self.workflow)
         self.assertIn("git push --atomic origin", self.workflow)
 
-    def test_exact_release_source_is_tested_and_built_once(self) -> None:
-        self.assertIn('test "$(git rev-parse HEAD)" = "$RELEASE_SHA"', self.workflow)
+    def test_exact_release_source_is_tested_and_built_once_in_isolated_jobs(self) -> None:
+        jobs = self.release_config["jobs"]
+        for job_name in ("unit-public-tests", "hermes-contract", "build"):
+            with self.subTest(job=job_name):
+                job_text = yaml.safe_dump(jobs[job_name])
+                self.assertIn("actions/checkout@", job_text)
+                self.assertIn("release-source.bundle", job_text)
+                self.assertIn('git rev-parse HEAD)" = "$RELEASE_SHA"', job_text)
+                self.assertIn("git status --porcelain", job_text)
+        build = jobs["build"]
+        self.assertEqual(
+            set(build["needs"]),
+            {"materialize", "unit-public-tests", "hermes-contract"},
+        )
+        build_text = yaml.safe_dump(build)
+        hermes_text = yaml.safe_dump(jobs["hermes-contract"])
+        self.assertIn("make test-contract", hermes_text)
+        self.assertNotIn("make test-contract", build_text)
+        self.assertNotIn(".hermes-agent", build_text)
+        self.assertIn("make build", build_text)
         self.assertEqual(self.workflow.count("make build"), 1)
         source_push = self.workflow.index("git push --atomic origin")
         self.assertLess(self.workflow.index("make test"), source_push)
@@ -352,7 +468,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         verify = self.release_config["jobs"]["verify-pypi"]
         self.assertIn("publish", verify["needs"])
         self.assertIn("verify-pypi", self.workflow)
-        self.assertIn("downloaded bytes", self.workflow)
+        self.assertIn("Verify PyPI bytes", self.workflow)
+        self.assertIn("finalize-receipt", self.workflow)
+        github_release = yaml.safe_dump(self.release_config["jobs"]["github-release"])
+        self.assertIn("release-receipt.json", github_release)
+        self.assertNotIn("release-manifest.json", github_release)
 
     def test_publishing_job_has_only_oidc_write_permission(self) -> None:
         publish = self.release_config["jobs"]["publish"]
@@ -366,10 +486,60 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             self.workflow,
         )
         self.assertIn("SEMANTIC_RELEASE_ENABLED", self.workflow)
+        immutable_control = yaml.safe_dump(
+            self.release_config["jobs"]["immutable-release-control"]
+        )
+        self.assertIn("immutable-releases", immutable_control)
+        self.assertIn("permission-administration: read", immutable_control)
+        self.assertIn("isImmutable", self.workflow)
         self.assertIn("validate-history", self.workflow)
         self.assertIn('"$version" = "$previous_version"', self.workflow)
         self.assertIn("Reject an already-published PyPI version", self.workflow)
         self.assertIn("404) ;;", self.workflow)
+        self.assertIn("--connect-timeout", self.workflow)
+        self.assertIn("--max-time", self.workflow)
+
+    def test_source_promotion_uses_protected_github_app_identity(self) -> None:
+        promote = self.release_config["jobs"]["promote-source"]
+        promote_text = yaml.safe_dump(promote)
+        self.assertEqual(promote["environment"], "source-promotion")
+        self.assertIn(
+            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            promote_text,
+        )
+        self.assertIn("SOURCE_PROMOTION_APP_CLIENT_ID", promote_text)
+        self.assertIn("SOURCE_PROMOTION_APP_PRIVATE_KEY", promote_text)
+        self.assertNotIn("github.token", promote_text)
+        self.assertIn("persist-credentials: 'false'", promote_text)
+        self.assertNotIn("personal_access_token", promote_text.lower())
+
+    def test_no_release_intent_never_enters_a_protected_environment(self) -> None:
+        jobs = self.release_config["jobs"]
+        materialize = jobs["materialize"]
+        immutable_control = jobs["immutable-release-control"]
+        promote = jobs["promote-source"]
+
+        self.assertEqual(materialize["needs"], "activation")
+        self.assertEqual(
+            materialize["if"], "needs.activation.outputs.enabled == 'true'"
+        )
+        self.assertEqual(immutable_control["needs"], "materialize")
+        self.assertEqual(
+            immutable_control["if"],
+            "needs.materialize.outputs.released == 'true'",
+        )
+        self.assertIn("immutable-release-control", promote["needs"])
+        self.assertIn("build", promote["needs"])
+        self.assertEqual(
+            promote["if"], "needs.materialize.outputs.released == 'true'"
+        )
+
+    def test_every_checkout_discards_automatic_credentials(self) -> None:
+        checkout_count = self.workflow.count("uses: actions/checkout@")
+        self.assertGreater(checkout_count, 0)
+        self.assertEqual(
+            checkout_count, self.workflow.count("persist-credentials: false")
+        )
 
     def test_publish_retry_never_rebuilds_and_must_reverify_registry_bytes(self) -> None:
         publish = self.release_config["jobs"]["publish"]
@@ -377,6 +547,29 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(publish_action["with"]["skip-existing"], "true")
         self.assertEqual(self.workflow.count("make build"), 1)
         self.assertIn("verify-pypi", self.release_config["jobs"])
+
+    def test_source_promotion_resumes_after_an_ambiguous_success(self) -> None:
+        promote = self.release_config["jobs"]["promote-source"]
+        push = promote["steps"][-1]["run"]
+
+        self.assertIn(
+            '[ "$remote_main" = "$RELEASE_SHA" ] && '
+            '[ "$remote_tag" = "$RELEASE_SHA" ]',
+            push,
+        )
+        self.assertIn(
+            '[ "$remote_main" = "$TRIGGER_SHA" ] && [ -z "$remote_tag" ]',
+            push,
+        )
+        self.assertIn("if ! git push --atomic origin", push)
+        self.assertGreaterEqual(
+            push.count('test "$remote_main" = "$RELEASE_SHA"'),
+            1,
+        )
+        self.assertGreaterEqual(
+            push.count('test "$remote_tag" = "$RELEASE_SHA"'),
+            1,
+        )
 
     def test_actions_are_immutable_sha_pinned(self) -> None:
         action_lines = [
