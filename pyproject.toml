@@ -1,7 +1,7 @@
 # Dependency manifest for hermes-plugin-kit (uv-native, GitOps source of truth).
-# Unlike the path-loaded plugins, this IS an installable library: consuming
-# plugins add it as a dependency (private git source) and import it. So it keeps
-# a build-system and stays buildable; it is not `package = false`.
+# Unlike path-loaded plugins, this is a public installable library: consuming
+# plugins declare a compatible PyPI range and import it. It keeps a build-system
+# and stays buildable; it is not `package = false`.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
@@ -12,7 +12,7 @@ version = "0.7.0"
 description = "Convention-correct middleware and lifecycle registration for hermes-agent plugins."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Offending Commit", email = "offendingcommit@gmail.com" }]
 keywords = ["hermes", "hermes-agent", "plugin", "llm-tools"]
 dependencies = ["pyyaml>=6"]
@@ -23,7 +23,37 @@ Repository = "https://github.com/offendingcommit/hermes-plugin-kit"
 # The runtime uses PyYAML for strict SKILL.md validation. Contract tests import
 # current upstream Hermes source, whose plugin and gateway seams need these.
 [dependency-groups]
-dev = ["httpx[socks]==0.28.1", "requests==2.33.0"]
+dev = [
+    "httpx[socks]==0.28.1",
+    "python-semantic-release==10.6.1",
+    "requests==2.33.0",
+    "twine==6.2.0",
+]
 
 [tool.setuptools]
 packages = ["hermes_plugin_kit"]
+
+[tool.semantic_release]
+allow_zero_version = true
+assets = ["uv.lock"]
+build_command = "uv lock --upgrade-package \"$PACKAGE_NAME\" && git add uv.lock"
+commit_message = "chore(release): v{version}"
+commit_parser = "conventional"
+major_on_zero = true
+tag_format = "v{version}"
+version_toml = ["pyproject.toml:project.version"]
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
+
+[tool.semantic_release.commit_parser_options]
+ignore_merge_commits = true
+parse_squash_commits = true
+
+[tool.semantic_release.remote]
+type = "github"
+token = { env = "GH_TOKEN" }
+
+[tool.semantic_release.publish]
+upload_to_vcs_release = false

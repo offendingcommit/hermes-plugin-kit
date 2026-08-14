@@ -1,43 +1,70 @@
+---
+# yamllint disable rule:line-length rule:truthy
 name: test
 
 on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   unittest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
           python-version: "3.11"
           enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Run unittest suite
-        run: make test
+        run: just test
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
+      - name: Build and validate package metadata
+        run: |
+          just build
+          just check-dist
 
   # Amber admission gates on the exact deployed Hermes fork contract. Keep the
   # immutable revision aligned with infra's candidate image/source receipt.
   hermes-deployed-context-engine-contract:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
           repository: NousResearch/hermes-agent
           ref: f80f453ae0679347e38abc917c7f94f717bf96c5
           path: .hermes-agent-deployed
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
           python-version: "3.11"
           enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Run context-engine contract against deployed Hermes revision
         env:
           HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent-deployed
         run: |
           test "$(git -C "$HERMES_AGENT_PATH" rev-parse HEAD)" = \
             "f80f453ae0679347e38abc917c7f94f717bf96c5"
-          uv run python -m unittest tests.test_context_engine_contract -v
+          just test-context-engine-contract
 
   # Track forward drift against upstream main without making Amber depend on
   # APIs that are newer than its exact deployed host.
@@ -45,18 +72,21 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
         with:
           repository: NousResearch/hermes-agent
           path: .hermes-agent
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
         with:
           python-version: "3.11"
           enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Run hermes contract tests against upstream main
         env:
           HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent
         run: |
           git -C "$HERMES_AGENT_PATH" rev-parse HEAD
-          uv run python -m unittest tests.test_hermes_contract -v
+          just test-contract

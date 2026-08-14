@@ -102,9 +102,9 @@ the same operations with `@tool` shadows the active-context-aware dispatch.
 In this repository:
 
 ```bash
-make install
-make test
-make build
+just install
+just test
+just build
 ```
 
 In a consumer, run its native suite plus registration and manifest-parity tests.
