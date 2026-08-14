@@ -464,15 +464,22 @@ class HermesContractTests(unittest.TestCase):
 
         self.assertIs(manager._context_engine, engine)
         self.assertEqual(summary.context_engine, "continuity-contract")
-        self.assertEqual(summary.context_engine_registration, "accepted")
+        # Upstream main still returns None after accepting the engine, while
+        # the deployed continuity host returns True. The receipt must remain
+        # truthful across both contracts.
+        self.assertIn(summary.context_engine_registration, {"accepted", "declared/submitted"})
         activated = copy.deepcopy(manager._context_engine)
         self.assertIsNot(activated, engine)
         self.assertEqual(activated.name, engine.name)
         self.assertNotIn("continuity_recover", manager._plugin_tool_names)
 
         second = ContractEngine()
-        with self.assertRaisesRegex(RuntimeError, "context engine.*registered"):
-            hpk.register_plugin(ctx, (), context_engine=second)
+        if summary.context_engine_registration == "accepted":
+            with self.assertRaisesRegex(RuntimeError, "context engine.*registered"):
+                hpk.register_plugin(ctx, (), context_engine=second)
+        else:
+            second_summary = hpk.register_plugin(ctx, (), context_engine=second)
+            self.assertEqual(second_summary.context_engine_registration, "declared/submitted")
         self.assertIs(manager._context_engine, engine)
 
     def test_command_registers_and_dispatches_through_real_plugin_context(self) -> None:
