@@ -87,14 +87,22 @@ class DeployedContextEngineContractTests(unittest.TestCase):
 
         self.assertIs(manager._context_engine, engine)
         self.assertEqual(summary.context_engine, "continuity-contract")
-        self.assertEqual(summary.context_engine_registration, "accepted")
+        # Stock v2026.8.13 returns no acceptance value from the public
+        # registrar, so the kit must not overstate the lifecycle receipt.
+        self.assertEqual(
+            summary.context_engine_registration, "declared/submitted"
+        )
         activated = copy.deepcopy(manager._context_engine)
         self.assertIsNot(activated, engine)
         self.assertEqual(activated.name, engine.name)
         self.assertNotIn("continuity_recover", manager._plugin_tool_names)
 
-        with self.assertRaisesRegex(RuntimeError, "context engine.*registered"):
-            hpk.register_plugin(ctx, (), context_engine=ContractEngine())
+        second_summary = hpk.register_plugin(
+            ctx, (), context_engine=ContractEngine()
+        )
+        self.assertEqual(
+            second_summary.context_engine_registration, "declared/submitted"
+        )
         self.assertIs(manager._context_engine, engine)
 
 
