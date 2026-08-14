@@ -292,19 +292,19 @@ def create_release_manifest(
         "registry_url": f"https://pypi.org/project/{PACKAGE_NAME}/{version}/",
         "artifacts": _artifact_records(artifact_dir, version),
         "evidence": {
-            "unit": {**passed, "command": "make test"},
+            "unit": {**passed, "command": "just test"},
             "public_contract": {
                 **passed,
-                "command": "make test-release (included in make test)",
+                "command": "just test-release (included in just test)",
             },
             "hermes_contract": {
                 **passed,
-                "command": "make test-contract",
+                "command": "just test-contract",
                 "hermes_source_sha": hermes_source_sha,
             },
             "build_metadata": {
                 **passed,
-                "command": "make build && make check-dist",
+                "command": "just build && just check-dist",
             },
             "workflow": {
                 "name": workflow,

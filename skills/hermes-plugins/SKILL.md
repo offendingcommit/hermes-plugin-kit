@@ -75,10 +75,9 @@ For catalog or content plugins, keep public summaries from leaking raw prompts, 
 Run the repo-native install/test commands before committing. Common examples:
 
 ```bash
-make install
-make test
-make build
-python -m unittest discover -s tests
+just install
+just test
+just build
 ```
 
 Also run focused registration, manifest-parity, hook or middleware, and local

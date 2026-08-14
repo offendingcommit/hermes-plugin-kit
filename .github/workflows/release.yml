@@ -201,6 +201,10 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
+      - name: Install Just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Download the immutable release source
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
@@ -229,7 +233,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          make test
+          just test
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(git rev-parse HEAD^)" = "$TRIGGER_SHA"
           test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
@@ -253,6 +257,10 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
+      - name: Install Just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Download the immutable release source
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
@@ -281,7 +289,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          make test-contract
+          just test-contract
           git -C .hermes-agent rev-parse HEAD > hermes-source-sha.txt
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(git rev-parse HEAD^)" = "$TRIGGER_SHA"
@@ -318,6 +326,10 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
+      - name: Install Just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Download the immutable release source
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
@@ -351,8 +363,8 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          make build
-          make check-dist
+          just build
+          just check-dist
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(git rev-parse HEAD^)" = "$TRIGGER_SHA"
           test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"

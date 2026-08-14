@@ -716,17 +716,19 @@ so the linked directory is self-contained.
 
 ## Development
 
-Uses [uv](https://docs.astral.sh/uv/). Install it with `brew install uv` (macOS) or
-`curl -LsSf https://astral.sh/uv/install.sh | sh`.
+Uses [uv](https://docs.astral.sh/uv/) and
+[Just](https://github.com/casey/just). On macOS, install both with
+`brew install uv just`; otherwise install them using their platform-specific
+instructions.
 
 ```bash
-make install     # uv sync — create/sync the dev environment
-make test        # uv run python -m unittest discover -s tests
-make test-one T=tests.test_kit.SchemaConventionTests
-make test-release # release intent, artifact identity, and workflow contracts
-make test-contract # real upstream Hermes contract
-make build       # uv build — wheel + sdist
-make check-dist  # validate wheel/sdist metadata with twine
+just install      # uv sync — create/sync the dev environment
+just test         # uv run python -m unittest discover -s tests
+just test-one tests.test_kit.SchemaConventionTests
+just test-release # release intent, artifact identity, and workflow contracts
+just test-contract # real upstream Hermes contract
+just build        # uv build — wheel + sdist
+just check-dist   # validate wheel/sdist metadata with twine
 ```
 
 CI pins every Action to an immutable commit and runs the unit, package metadata,

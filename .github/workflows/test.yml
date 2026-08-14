@@ -18,8 +18,11 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Run unittest suite
-        run: make test
+        run: just test
 
   package:
     runs-on: ubuntu-latest
@@ -29,10 +32,13 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Build and validate package metadata
         run: |
-          make build
-          make check-dist
+          just build
+          just check-dist
 
   # Amber admission gates on the exact deployed Hermes fork contract. Keep the
   # immutable revision aligned with infra's candidate image/source receipt.
@@ -49,13 +55,16 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Run context-engine contract against deployed Hermes revision
         env:
           HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent-deployed
         run: |
           test "$(git -C "$HERMES_AGENT_PATH" rev-parse HEAD)" = \
             "d3b1cfe9a80531e0682b1e66752e04cea29d5d4a"
-          uv run python -m unittest tests.test_context_engine_contract -v
+          just test-context-engine-contract
 
   # Track forward drift against upstream main without making Amber depend on
   # APIs that are newer than its exact deployed host.
@@ -72,9 +81,12 @@ jobs:
         with:
           python-version: "3.11"
           enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
       - name: Run hermes contract tests against upstream main
         env:
           HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent
         run: |
           git -C "$HERMES_AGENT_PATH" rev-parse HEAD
-          uv run python -m unittest tests.test_hermes_contract -v
+          just test-contract

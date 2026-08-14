@@ -71,9 +71,9 @@ plugin.
   and recovery dispatch on `get_tool_schemas` / `handle_tool_call`; do not
   duplicate native engine tools through `@tool`.
 - Redact secret-looking values in logs and avoid logging full untrusted payloads.
-- Use `uv` and the Makefile for local development:
-  `make install`, `make test`, `make test-one T=tests.test_kit.SchemaConventionTests`,
-  and `make build`.
+- Use `uv` and the `justfile` for local development:
+  `just install`, `just test`,
+  `just test-one tests.test_kit.SchemaConventionTests`, and `just build`.
 
 ## Release Notes
 

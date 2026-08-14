@@ -216,6 +216,19 @@ class ReleaseReceiptTests(unittest.TestCase):
                 self.assertEqual(receipt["evidence"][gate]["source_sha"], self.SOURCE_SHA)
                 self.assertEqual(receipt["evidence"][gate]["result"], "passed")
                 self.assertTrue(receipt["evidence"][gate]["command"])
+            self.assertEqual(receipt["evidence"]["unit"]["command"], "just test")
+            self.assertEqual(
+                receipt["evidence"]["public_contract"]["command"],
+                "just test-release (included in just test)",
+            )
+            self.assertEqual(
+                receipt["evidence"]["hermes_contract"]["command"],
+                "just test-contract",
+            )
+            self.assertEqual(
+                receipt["evidence"]["build_metadata"]["command"],
+                "just build && just check-dist",
+            )
             self.assertEqual(receipt["receipt_state"], "prepublication")
             self.assertEqual(
                 verify_release_manifest(root / "release-receipt.json", dist), receipt
@@ -445,14 +458,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         build_text = yaml.safe_dump(build)
         hermes_text = yaml.safe_dump(jobs["hermes-contract"])
-        self.assertIn("make test-contract", hermes_text)
-        self.assertNotIn("make test-contract", build_text)
+        self.assertIn("just test-contract", hermes_text)
+        self.assertNotIn("just test-contract", build_text)
         self.assertNotIn(".hermes-agent", build_text)
-        self.assertIn("make build", build_text)
-        self.assertEqual(self.workflow.count("make build"), 1)
+        self.assertIn("just build", build_text)
+        self.assertEqual(self.workflow.count("just build"), 1)
         source_push = self.workflow.index("git push --atomic origin")
-        self.assertLess(self.workflow.index("make test"), source_push)
-        self.assertLess(self.workflow.index("make build"), source_push)
+        self.assertLess(self.workflow.index("just test"), source_push)
+        self.assertLess(self.workflow.index("just build"), source_push)
 
     def test_pypi_publish_precedes_discoverable_github_release_receipt(self) -> None:
         publish = self.workflow.index("pypa/gh-action-pypi-publish@")
@@ -545,7 +558,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         publish = self.release_config["jobs"]["publish"]
         publish_action = publish["steps"][-1]
         self.assertEqual(publish_action["with"]["skip-existing"], "true")
-        self.assertEqual(self.workflow.count("make build"), 1)
+        self.assertEqual(self.workflow.count("just build"), 1)
         self.assertIn("verify-pypi", self.release_config["jobs"])
 
     def test_source_promotion_resumes_after_an_ambiguous_success(self) -> None:
@@ -590,6 +603,48 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 self.assertRegex(line, r"uses: [^@]+@[0-9a-f]{40}\s+#\s+\S+")
         config = yaml.load(self.test_workflow, Loader=yaml.BaseLoader)
         self.assertEqual(config["permissions"], {"contents": "read"})
+
+    def test_workflows_install_and_use_only_just(self) -> None:
+        setup_just = (
+            "extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3"
+        )
+        workflows = {
+            "release": self.workflow,
+            "test": self.test_workflow,
+        }
+        for workflow_name, workflow in workflows.items():
+            config = yaml.load(workflow, Loader=yaml.BaseLoader)
+            for job_name, job in config["jobs"].items():
+                steps = job.get("steps", [])
+                just_steps = [
+                    index
+                    for index, step in enumerate(steps)
+                    if any(
+                        line.strip() == "just" or line.strip().startswith("just ")
+                        for line in step.get("run", "").splitlines()
+                    )
+                ]
+                if not just_steps:
+                    continue
+                setup_steps = [
+                    index
+                    for index, step in enumerate(steps)
+                    if step.get("uses") == setup_just
+                    and step.get("with", {}).get("just-version") == "1.58.0"
+                ]
+                with self.subTest(workflow=workflow_name, job=job_name):
+                    self.assertTrue(
+                        any(index < just_steps[0] for index in setup_steps),
+                        "Just-using jobs must install the pinned version first",
+                    )
+
+            with self.subTest(workflow=workflow_name):
+                self.assertNotRegex(workflow, r"(?m)^\s+make(?:\s|$)")
+                self.assertNotIn("run: make", workflow)
+
+    def test_justfile_is_the_only_repository_task_runner(self) -> None:
+        self.assertTrue((ROOT / "justfile").is_file())
+        self.assertFalse((ROOT / "Makefile").exists())
 
     def test_unsafe_pull_request_target_is_not_used(self) -> None:
         self.assertNotIn("pull_request_target", self.workflow)
