@@ -67,6 +67,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
 
+from .observability import (
+    ObservabilityEvent,
+    credential_identity_hash,
+    log_observability_event,
+    new_correlation_id,
+)
+
 __all__ = [
     "tool",
     "command",
@@ -108,6 +115,10 @@ __all__ = [
     "str_arg",
     "int_arg",
     "bool_arg",
+    "ObservabilityEvent",
+    "credential_identity_hash",
+    "log_observability_event",
+    "new_correlation_id",
 ]
 
 _SPEC_ATTR = "_hpk_tool_spec"

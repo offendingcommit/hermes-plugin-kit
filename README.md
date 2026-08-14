@@ -614,6 +614,64 @@ The kit never logs handler result payloads. Keys containing `token`, `secret`,
 `password`, `passwd`, `api_key`, `apikey`, or `auth` are replaced with `***` at
 any nesting depth before arguments are logged.
 
+### Structured plugin lifecycle receipts
+
+Plugins with asynchronous or multi-stage work can emit correlated, local JSON
+receipts without logging full tool payloads:
+
+```python
+import logging
+
+from hermes_plugin_kit import (
+    ObservabilityEvent,
+    credential_identity_hash,
+    log_observability_event,
+    new_correlation_id,
+)
+
+correlation_id = new_correlation_id()
+log_observability_event(
+    logging.getLogger(__name__),
+    ObservabilityEvent(
+        plugin="sirens",
+        event="generation.retrieve",
+        correlation_id=correlation_id,
+        persona="DJ Doot",
+        lane="dj-doot-k7",
+        tool="siren_video_gen",
+        request_id="request-123",
+        provider="google",
+        model="gemini-omni-flash-preview",
+        credential_ref="secret/hermes-agent/google-api",
+        credential_hash=credential_identity_hash(api_key),
+        stage="provider_retrieve",
+        status="failed",
+        http_status=403,
+        error_code="permission_denied",
+        error_message="Provider access denied",
+        elapsed_ms=1438.13,
+        retry_classification="terminal",
+        artifact_outcome="not_created",
+    ),
+)
+```
+
+The emitted mapping uses schema `hermes.plugin.observability.v1`. It supports
+`persona`, `lane`, `tool`, `request_id`, `fingerprint`, `provider`, `model`,
+`credential_ref`, `credential_hash`, `stage`, `status`, `http_status`,
+`error_code`, `error_message`, `elapsed_ms`, `retry_classification`, and
+`artifact_outcome`, plus bounded `attributes` for plugin-specific safe metadata.
+Null fields are omitted. Failed statuses default to `WARNING`; other statuses
+default to `INFO`, and callers may explicitly select a log level.
+
+Receipts go only through the supplied Python logger—there is no exporter or
+outbound telemetry. Secret-looking nested attribute keys and common inline
+credential forms are forcibly redacted, strings and collections are bounded,
+and control characters are escaped. `credential_identity_hash` accepts secret
+material only to calculate a domain-separated, truncated SHA-256 identity; the
+event must contain the returned identity or a safe secret reference, never the
+credential itself.
+
 ## Agent skills
 
 Repository-owned skills are consumable directly from [`skills/`](skills). To

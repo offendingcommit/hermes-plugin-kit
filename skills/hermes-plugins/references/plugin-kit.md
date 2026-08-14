@@ -10,6 +10,8 @@ path-loaded Hermes plugin and not an upstream Hermes API.
 - Maintainer rules: [`AGENTS.md`](../../../AGENTS.md)
 - Exported API and behavior: [`hermes_plugin_kit/__init__.py`](../../../hermes_plugin_kit/__init__.py)
 - Unit contracts: [`tests/test_kit.py`](../../../tests/test_kit.py)
+- Structured observability contracts:
+  [`tests/test_observability.py`](../../../tests/test_observability.py)
 - Real Hermes compatibility contracts:
   [`tests/test_hermes_contract.py`](../../../tests/test_hermes_contract.py)
 - Package and Python requirements: [`pyproject.toml`](../../../pyproject.toml)
@@ -28,6 +30,7 @@ guidance, not a second implementation specification.
 | Plugin-owned skill | `plugin_skill` | `register_plugin(..., skills=...)` | Hermes adds the plugin namespace; missing required skills fail, optional skills warn and skip. |
 | Host-managed call | `invoke_host_tool` | None | Use for supported non-registry capabilities such as `send_message`; pre/post-tool hooks remain active. |
 | Local media delivery | `MediaPayload`, `MediaType`, `deliver_media` | Consumer registers suppression hooks | File must be absolute, present, and non-empty; `origin` resolves from task-local Hermes context. |
+| Correlated lifecycle receipt | `ObservabilityEvent`, `log_observability_event`, `new_correlation_id`, `credential_identity_hash` | None | Emits bounded, redacted JSON through the supplied local logger; consumers provide domain stages and never place credentials in event fields. |
 
 `RegistrationSummary` reports commands, tools, middleware, hooks, skills, and
 skipped optional skills registered by `register_plugin`.
@@ -38,6 +41,7 @@ skipped optional skills registered by `register_plugin`.
 - Required-argument metadata, validation, and model-facing error text.
 - JSON success and error envelopes around kit-decorated tool handlers.
 - Redacted lifecycle logging and registration inventories.
+- A versioned, correlated lifecycle-event shape with bounded local JSON logging.
 - Duplicate lifecycle declaration checks before registration.
 - Guarded host invocation for supported host-managed tools.
 - Typed Hermes media directives, origin resolution, privacy-safe results, and
