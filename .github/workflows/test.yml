@@ -24,8 +24,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
         with:
-          repository: offendingcommit/hermes-agent
-          ref: d3b1cfe9a80531e0682b1e66752e04cea29d5d4a
+          repository: NousResearch/hermes-agent
+          ref: f80f453ae0679347e38abc917c7f94f717bf96c5
           path: .hermes-agent-deployed
       - uses: astral-sh/setup-uv@v8.2.0
         with:
@@ -36,7 +36,7 @@ jobs:
           HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent-deployed
         run: |
           test "$(git -C "$HERMES_AGENT_PATH" rev-parse HEAD)" = \
-            "d3b1cfe9a80531e0682b1e66752e04cea29d5d4a"
+            "f80f453ae0679347e38abc917c7f94f717bf96c5"
           uv run python -m unittest tests.test_context_engine_contract -v
 
   # Track forward drift against upstream main without making Amber depend on
