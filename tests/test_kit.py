@@ -9,10 +9,29 @@ import sys
 import tempfile
 import types
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import hermes_plugin_kit as hpk
+
+
+@contextmanager
+def fake_context_engine_host():
+    """Install the minimum real-type import seam used by registration preflight."""
+    agent_module = types.ModuleType("agent")
+    context_engine_module = types.ModuleType("agent.context_engine")
+
+    class ContextEngine:
+        pass
+
+    context_engine_module.ContextEngine = ContextEngine
+    agent_module.context_engine = context_engine_module
+    with patch.dict(
+        sys.modules,
+        {"agent": agent_module, "agent.context_engine": context_engine_module},
+    ):
+        yield ContextEngine
 
 
 class FakeCtx:
@@ -34,6 +53,8 @@ class FakePluginCtx(FakeCtx):
         self.image_gen_providers: list[object] = []
         self.video_gen_providers: list[object] = []
         self.memory_providers: list[object] = []
+        self.context_engines: list[object] = []
+        self.context_engine_result = True
         self.subagent_lifecycle = types.SimpleNamespace(
             launch=lambda request: request,
             status=lambda handle: handle,
@@ -66,6 +87,10 @@ class FakePluginCtx(FakeCtx):
 
     def register_memory_provider(self, provider) -> None:
         self.memory_providers.append(provider)
+
+    def register_context_engine(self, engine):
+        self.context_engines.append(engine)
+        return self.context_engine_result
 
 
 class SessionDBHelperTests(unittest.TestCase):
@@ -1568,6 +1593,97 @@ class RegisterPluginTests(unittest.TestCase):
         self.assertEqual(summary.image_gen_providers, ("image",))
         self.assertEqual(summary.video_gen_providers, ("video",))
 
+    def test_registers_one_typed_context_engine_with_accepted_receipt(self) -> None:
+        with fake_context_engine_host() as ContextEngine:
+            engine = ContextEngine()
+            engine.name = "continuity"
+            ctx = FakePluginCtx()
+
+            with self.assertLogs(level="INFO") as cap:
+                summary = hpk.register_plugin(
+                    ctx, self._module(), context_engine=engine
+                )
+
+        self.assertEqual(ctx.context_engines, [engine])
+        self.assertEqual(summary.context_engine, "continuity")
+        self.assertEqual(summary.context_engine_registration, "accepted")
+        receipt = "\n".join(cap.output)
+        self.assertIn("context_engine=continuity", receipt)
+        self.assertIn("context_engine_registration=accepted", receipt)
+
+    def test_legacy_context_engine_registrar_is_reported_as_submitted(self) -> None:
+        with fake_context_engine_host() as ContextEngine:
+            engine = ContextEngine()
+            engine.name = "continuity"
+            ctx = FakePluginCtx()
+            ctx.context_engine_result = None
+
+            summary = hpk.register_plugin(ctx, self._module(), context_engine=engine)
+
+        self.assertEqual(summary.context_engine, "continuity")
+        self.assertEqual(summary.context_engine_registration, "declared/submitted")
+
+    def test_omitting_context_engine_preserves_existing_behavior(self) -> None:
+        ctx = FakePluginCtx()
+
+        summary = hpk.register_plugin(ctx, self._module())
+
+        self.assertEqual(ctx.context_engines, [])
+        self.assertIsNone(summary.context_engine)
+        self.assertIsNone(summary.context_engine_registration)
+
+    def test_context_engine_preflight_finishes_before_host_mutation(self) -> None:
+        @hpk.tool(toolset="sample", name="sample_context_engine_preflight")
+        def sample_tool(args, **kwargs):
+            """Sample tool."""
+            return {}
+
+        cases = (
+            ("missing registrar", object(), RuntimeError, "register_context_engine"),
+            ("blank name", types.SimpleNamespace(name=" "), ValueError, "non-empty name"),
+            (
+                "wrong type",
+                types.SimpleNamespace(name="continuity"),
+                TypeError,
+                "ContextEngine",
+            ),
+        )
+        with fake_context_engine_host():
+            for label, engine, error_type, message in cases:
+                with self.subTest(label=label):
+                    ctx = FakePluginCtx()
+                    if label == "missing registrar":
+                        ctx.register_context_engine = None
+                    with self.assertRaisesRegex(error_type, message):
+                        hpk.register_plugin(
+                            ctx,
+                            self._module(sample_tool=sample_tool),
+                            context_engine=engine,
+                        )
+                    self.assertEqual(ctx.tools, [])
+                    self.assertEqual(ctx.context_engines, [])
+
+    def test_rejected_second_context_engine_fails_before_other_mutation(self) -> None:
+        @hpk.hook("pre_llm_call")
+        def sample_hook(**kwargs):
+            return kwargs
+
+        with fake_context_engine_host() as ContextEngine:
+            engine = ContextEngine()
+            engine.name = "continuity"
+            ctx = FakePluginCtx()
+            ctx.context_engine_result = False
+
+            with self.assertRaisesRegex(RuntimeError, "only one context engine"):
+                hpk.register_plugin(
+                    ctx,
+                    self._module(sample_hook=sample_hook),
+                    context_engine=engine,
+                )
+
+        self.assertEqual(ctx.context_engines, [engine])
+        self.assertEqual(ctx.hooks, [])
+
     def test_preflights_provider_support_before_registering_tools(self) -> None:
         @hpk.tool(toolset="sample", name="sample_tool")
         def sample_tool(args, **kwargs):
@@ -1623,7 +1739,8 @@ class RegisterPluginTests(unittest.TestCase):
             "skipped_optional_skills=missing-optional; "
             "memory_providers=<none>; "
             "image_gen_providers=<none>; video_gen_providers=<none>; "
-            "capabilities=image,video",
+            "capabilities=image,video; context_engine=<none>; "
+            "context_engine_registration=<none>",
         )
 
     def test_register_plugin_reports_selected_capabilities(self) -> None:
