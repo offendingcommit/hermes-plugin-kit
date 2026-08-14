@@ -3,7 +3,7 @@ UV ?= uv
 HERMES_AGENT_REPO ?= https://github.com/NousResearch/hermes-agent.git
 HERMES_AGENT_DIR ?= .hermes-agent
 
-.PHONY: help install test test-one test-contract build clean
+.PHONY: help install test test-one test-release test-contract build check-dist clean
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -18,6 +18,9 @@ test: ## Run the full unittest suite
 test-one: ## Run a single test: make test-one T=tests.test_kit.Class.method
 	$(UV) run python -m unittest $(T)
 
+test-release: ## Run deterministic release intent, identity, and workflow contracts
+	$(UV) run python -m unittest tests.test_release_contract -v
+
 test-contract: ## Clone hermes-agent into a staging dir and run the contract tests against it
 	@if [ -d "$(HERMES_AGENT_DIR)/.git" ]; then \
 		echo "Updating $(HERMES_AGENT_DIR)"; git -C "$(HERMES_AGENT_DIR)" pull --ff-only -q || true; \
@@ -27,7 +30,11 @@ test-contract: ## Clone hermes-agent into a staging dir and run the contract tes
 	HERMES_AGENT_PATH="$(abspath $(HERMES_AGENT_DIR))" $(UV) run python -m unittest tests.test_hermes_contract -v
 
 build: ## Build the wheel/sdist distribution
+	rm -rf dist
 	$(UV) build
+
+check-dist: ## Validate wheel and sdist package metadata
+	$(UV) run twine check dist/*
 
 clean: ## Remove Python caches and build artifacts
 	find . -type d -name __pycache__ -prune -exec rm -rf {} +

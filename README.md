@@ -3,6 +3,7 @@
 > Lifecycle helpers for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct commands, tools, middleware, hooks, skills, validation, and safe logging, baked in.
 
 [![test](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml/badge.svg)](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/hermes-plugin-kit)](https://pypi.org/project/hermes-plugin-kit/)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 `hermes-plugin-kit` is a tiny, dependency-free helper for authoring plugins for
@@ -80,23 +81,21 @@ and adds nothing to your runtime footprint — pure standard library.
 
 ## Install
 
-The package is consumed straight from Git (works great with [uv](https://docs.astral.sh/uv/)):
+Install a published release from PyPI with [uv](https://docs.astral.sh/uv/) or pip:
 
 ```bash
-uv add git+https://github.com/offendingcommit/hermes-plugin-kit.git
-# or
-pip install git+https://github.com/offendingcommit/hermes-plugin-kit.git
+uv add "hermes-plugin-kit>=0.7,<1"
+# or: pip install "hermes-plugin-kit>=0.7,<1"
 ```
 
-With uv, pin it to an immutable commit in your plugin's `pyproject.toml`.
-Profiles that load several plugins into one Python environment must keep every
-plugin on the same kit revision:
+Consumers declare the narrowest truthful compatibility range in
+`pyproject.toml`; adopting a newer kit API and raising that lower bound are one
+change. Repository locks remain exact for reproducible local tests. Fleet
+deployment independently selects one qualified wheel filename and SHA-256 for
+every co-loaded plugin, so a movable branch is never a deployment identity.
 
 ```toml
-dependencies = ["hermes-plugin-kit"]
-
-[tool.uv.sources]
-hermes-plugin-kit = { git = "https://github.com/offendingcommit/hermes-plugin-kit.git", rev = "<commit-sha>" }
+dependencies = ["hermes-plugin-kit>=0.7,<1"]
 ```
 
 ## Usage
@@ -724,10 +723,50 @@ Uses [uv](https://docs.astral.sh/uv/). Install it with `brew install uv` (macOS)
 make install     # uv sync — create/sync the dev environment
 make test        # uv run python -m unittest discover -s tests
 make test-one T=tests.test_kit.SchemaConventionTests
+make test-release # release intent, artifact identity, and workflow contracts
+make test-contract # real upstream Hermes contract
 make build       # uv build — wheel + sdist
+make check-dist  # validate wheel/sdist metadata with twine
 ```
 
-CI runs `make test` on `actions/checkout@v6` + `astral-sh/setup-uv@v8.2.0` (Python 3.11).
+CI pins every Action to an immutable commit and runs the unit, package metadata,
+and real-Hermes contract lanes with read-only repository permissions.
+
+## Releases
+
+Merges to `main` use Python Semantic Release 10.6.x and Conventional Commits:
+`fix` produces a patch, `feat` produces a minor, and `!` or a
+`BREAKING CHANGE:` footer produces a major. Documentation, test, CI, and chore
+commits do not release by themselves; an invalid commit in release history
+fails closed. Major releases are published but their receipt is always
+`manual_migration_required`, never an automatic promotion candidate.
+
+The workflow first creates the version/CHANGELOG commit and tag locally. It
+tests that exact final SHA with the unit and real-Hermes contract suites, builds
+the wheel and sdist once, validates their metadata, and records their filenames
+and SHA-256 values. Only then may a narrow write job atomically push that tested
+commit and tag. A separate `pypi` environment publishes the uploaded artifacts
+through OIDC Trusted Publishing; no password or API token is used. The GitHub
+Release and its JSON receipt are created only after PyPI succeeds. A failed
+publish is retried from the retained workflow artifact and must not rebuild it.
+
+Release automation is deliberately disarmed unless the repository variable
+`SEMANTIC_RELEASE_ENABLED` is exactly `true`. Set it only after all activation
+prerequisites have been reviewed:
+
+- a pending or existing PyPI Trusted Publisher is configured for
+  `offendingcommit/hermes-plugin-kit`, workflow `release.yml`, and environment
+  `pypi`;
+- the protected GitHub environment is named exactly `pypi`;
+- the `main` ruleset requires the ordinary test workflow and permits only the
+  guarded Semantic Release source-promotion job to advance the release commit;
+- the existing `0.7.0` source baseline has a reviewed immutable `v0.7.0` tag.
+
+The repository currently creates none of those external controls itself. A
+missing switch, PyPI project, baseline tag, test, build, metadata check, source
+identity, or artifact hash stops before publication. The release receipt is the
+discoverable boundary for downstream qualification; polling and recovery from
+a missed notification belong to that downstream system.
 
 ## License
 

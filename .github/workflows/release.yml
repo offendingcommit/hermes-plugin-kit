@@ -1,0 +1,336 @@
+---
+# yamllint disable rule:line-length rule:truthy
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: semantic-release-main
+  cancel-in-progress: false
+
+jobs:
+  activation:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.gate.outputs.enabled }}
+    steps:
+      - name: Enforce reviewed activation gate
+        id: gate
+        env:
+          RELEASE_ENABLED: ${{ vars.SEMANTIC_RELEASE_ENABLED }}
+        run: |
+          if [ "$RELEASE_ENABLED" != "true" ]; then
+            echo "Semantic release is disarmed. See README activation prerequisites."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    needs: activation
+    if: needs.activation.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.identity.outputs.artifact_name }}
+      previous_version: ${{ steps.intent.outputs.previous_version }}
+      released: ${{ steps.intent.outputs.released }}
+      release_sha: ${{ steps.identity.outputs.release_sha }}
+      tag: ${{ steps.identity.outputs.tag }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - name: Check out the triggering main revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install the frozen release toolchain
+        run: uv sync --frozen
+      - name: Validate the tagged baseline and strict release intent
+        id: intent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          baseline="$(uv run python scripts/release_contract.py validate-baseline --repository .)"
+          baseline_tag="$(python -c 'import json,sys; print(json.load(sys.stdin)["tag"])' <<< "$baseline")"
+          uv run python scripts/release_contract.py validate-history \
+            --repository . --baseline-tag "$baseline_tag"
+          previous_version="$(uv run semantic-release version --print-last-released)"
+          version="$(uv run semantic-release version --print)"
+          {
+            echo "previous_version=$previous_version"
+            if [ -z "$version" ] || [ "$version" = "$previous_version" ]; then
+              echo "No patch, minor, or breaking release intent." >&2
+              echo "released=false"
+            else
+              tag="v$version"
+              if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+                echo "Refusing existing release tag $tag" >&2
+                exit 1
+              fi
+              echo "released=true"
+              echo "version=$version"
+            fi
+          } >> "$GITHUB_OUTPUT"
+      - name: Materialize the release commit and tag locally
+        if: steps.intent.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          uv run semantic-release --strict version --no-push --no-vcs-release
+      - name: Bind the final local release identity
+        if: steps.intent.outputs.released == 'true'
+        id: identity
+        env:
+          EXPECTED_PARENT: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ steps.intent.outputs.version }}
+        run: |
+          release_sha="$(git rev-parse HEAD)"
+          tag="v$EXPECTED_VERSION"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT"
+          test "$(git rev-list -n 1 "$tag")" = "$release_sha"
+          test -z "$(git status --porcelain)"
+          unexpected="$(git diff --name-only "$EXPECTED_PARENT" "$release_sha" | grep -Ev '^(CHANGELOG\.md|pyproject\.toml|uv\.lock)$' || true)"
+          test -z "$unexpected"
+          {
+            echo "release_sha=$release_sha"
+            echo "tag=$tag"
+            echo "version=$EXPECTED_VERSION"
+            echo "artifact_name=release-$EXPECTED_VERSION-$release_sha"
+          } >> "$GITHUB_OUTPUT"
+      - name: Reject an already-published PyPI version
+        if: steps.intent.outputs.released == 'true'
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          status="$(curl --silent --show-error --output /dev/null \
+            --write-out '%{http_code}' \
+            "https://pypi.org/pypi/hermes-plugin-kit/$VERSION/json")"
+          case "$status" in
+            404) ;;
+            200)
+              echo "Refusing existing PyPI version $VERSION" >&2
+              exit 1
+              ;;
+            *)
+              echo "PyPI version preflight was inconclusive: HTTP $status" >&2
+              exit 1
+              ;;
+          esac
+      - name: Prove the exact release SHA with unit and public contracts
+        if: steps.intent.outputs.released == 'true'
+        env:
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          make test
+      - name: Prove the exact release SHA against Hermes
+        if: steps.intent.outputs.released == 'true'
+        env:
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          make test-contract
+          git -C .hermes-agent rev-parse HEAD > hermes-source-sha.txt
+      - name: Build the exact release SHA once and validate metadata
+        if: steps.intent.outputs.released == 'true'
+        env:
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          make build
+          make check-dist
+      - name: Create and verify the immutable release receipt
+        if: steps.intent.outputs.released == 'true'
+        env:
+          PREVIOUS_VERSION: ${{ steps.intent.outputs.previous_version }}
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+          TAG: ${{ steps.identity.outputs.tag }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          uv run python scripts/release_contract.py create-receipt \
+            --previous-version "$PREVIOUS_VERSION" \
+            --version "$VERSION" \
+            --tag "$TAG" \
+            --source-sha "$RELEASE_SHA" \
+            --hermes-source-sha "$(cat hermes-source-sha.txt)" \
+            --workflow "release.yml" \
+            --run-id "${{ github.run_id }}" \
+            --run-attempt "${{ github.run_attempt }}" \
+            --artifact-dir dist \
+            --output release-receipt.json
+          uv run python scripts/release_contract.py verify-receipt \
+            --receipt release-receipt.json \
+            --artifact-dir dist
+      - name: Bundle the tested source and immutable artifacts
+        if: steps.intent.outputs.released == 'true'
+        env:
+          RELEASE_SHA: ${{ steps.identity.outputs.release_sha }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        run: |
+          git branch release-candidate "$RELEASE_SHA"
+          git bundle create release-source.bundle \
+            refs/heads/release-candidate "refs/tags/$TAG"
+          git branch --delete --force release-candidate
+          sha256sum release-source.bundle release-receipt.json dist/* \
+            > release-payload.sha256
+      - name: Upload the tested release payload
+        if: steps.intent.outputs.released == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        with:
+          name: ${{ steps.identity.outputs.artifact_name }}
+          path: |
+            dist/
+            release-payload.sha256
+            release-receipt.json
+            release-source.bundle
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+  promote-source:
+    needs: prepare
+    if: needs.prepare.outputs.released == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      artifact_name: ${{ needs.prepare.outputs.artifact_name }}
+      release_sha: ${{ needs.prepare.outputs.release_sha }}
+      tag: ${{ needs.prepare.outputs.tag }}
+      version: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Check out the guarded parent revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+      - name: Download the tested release payload
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact_name }}
+      - name: Validate and atomically push only the tested source
+        env:
+          RELEASE_SHA: ${{ needs.prepare.outputs.release_sha }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          sha256sum --check release-payload.sha256
+          git bundle verify release-source.bundle
+          git fetch release-source.bundle \
+            refs/heads/release-candidate:refs/heads/release-candidate \
+            "refs/tags/$TAG:refs/tags/$TAG"
+          test "$(git rev-parse refs/heads/release-candidate)" = "$RELEASE_SHA"
+          test "$(git rev-parse "$RELEASE_SHA^")" = "$TRIGGER_SHA"
+          test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
+          unexpected="$(git diff --name-only "$TRIGGER_SHA" "$RELEASE_SHA" | grep -Ev '^(CHANGELOG\.md|pyproject\.toml|uv\.lock)$' || true)"
+          test -z "$unexpected"
+          remote_main="$(git ls-remote origin refs/heads/main | cut -f1)"
+          test "$remote_main" = "$TRIGGER_SHA"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Refusing existing release tag $TAG" >&2
+            exit 1
+          fi
+          git push --atomic origin \
+            "$RELEASE_SHA:refs/heads/main" \
+            "refs/tags/$TAG:refs/tags/$TAG"
+
+  publish:
+    needs: promote-source
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/hermes-plugin-kit/${{ needs.promote-source.outputs.version }}/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download the tested release payload
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        with:
+          name: ${{ needs.promote-source.outputs.artifact_name }}
+      - name: Recheck the immutable payload before publication
+        run: sha256sum --check release-payload.sha256
+      - name: Publish the tested distributions with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          packages-dir: dist/
+          # Safe because the next job downloads and hash-verifies every PyPI file.
+          skip-existing: true
+
+  verify-pypi:
+    needs: [promote-source, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the published source identity
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          ref: ${{ needs.promote-source.outputs.release_sha }}
+      - name: Download the published release payload
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        with:
+          name: ${{ needs.promote-source.outputs.artifact_name }}
+      - name: Verify PyPI filenames, metadata hashes, and downloaded bytes
+        env:
+          RELEASE_SHA: ${{ needs.promote-source.outputs.release_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          sha256sum --check release-payload.sha256
+          python scripts/release_contract.py verify-pypi \
+            --receipt release-receipt.json
+
+  github-release:
+    needs: [promote-source, publish, verify-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the published release payload
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        with:
+          name: ${{ needs.promote-source.outputs.artifact_name }}
+      - name: Verify the payload published by the preceding job
+        run: sha256sum --check release-payload.sha256
+      - name: Create the discoverable GitHub Release and receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.promote-source.outputs.release_sha }}
+          TAG: ${{ needs.promote-source.outputs.tag }}
+          VERSION: ${{ needs.promote-source.outputs.version }}
+        run: |
+          repository_url="https://github.com/$GITHUB_REPOSITORY.git"
+          remote_tag="$(git ls-remote "$repository_url" "refs/tags/$TAG^{}" | cut -f1)"
+          if [ -z "$remote_tag" ]; then
+            remote_tag="$(git ls-remote "$repository_url" "refs/tags/$TAG" | cut -f1)"
+          fi
+          test "$remote_tag" = "$RELEASE_SHA"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            mkdir existing-release
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --dir existing-release
+            cmp release-receipt.json existing-release/release-receipt.json
+            for artifact in dist/*; do
+              cmp "$artifact" "existing-release/$(basename "$artifact")"
+            done
+          else
+            gh release create "$TAG" dist/* release-receipt.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "hermes-plugin-kit $VERSION" \
+              --generate-notes
+          fi
