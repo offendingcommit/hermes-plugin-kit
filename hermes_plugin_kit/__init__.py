@@ -1278,6 +1278,26 @@ def _validate_plugin_skill_file(
     _validate_hermes_skill_metadata(frontmatter)
 
 
+def _require_references_dir_within_skill(skill_path: Path, references_dir: Path) -> None:
+    """Reject a references_dir that isn't actually scoped to the skill's own directory.
+
+    references_dir accepts any directory by name -- without this check, a plugin author (by
+    mistake or otherwise) could point it at an unrelated, much larger directory (a home directory,
+    a mounted secrets volume, `/etc`), and plugin_reference_tool would then expose that entire
+    tree for reading, since its own path-traversal check only proves containment within whatever
+    directory it was handed, not that the directory itself is a legitimate skill companion folder.
+    Does not require either path to exist -- Path.resolve() normalizes non-existent paths too.
+    """
+    skill_dir = skill_path.resolve().parent
+    try:
+        references_dir.resolve().relative_to(skill_dir)
+    except ValueError:
+        raise ValueError(
+            f"references_dir must be inside the skill's own directory ({skill_dir}); "
+            f"got {references_dir}"
+        ) from None
+
+
 def plugin_skill(
     name: str,
     path: str | Path,
@@ -1317,6 +1337,7 @@ def plugin_skill(
     resolved_references_dir: Path | None = None
     if references_dir is not None:
         resolved_references_dir = Path(references_dir)
+        _require_references_dir_within_skill(skill_path, resolved_references_dir)
         if not optional and not resolved_references_dir.is_dir():
             raise NotADirectoryError(f"references_dir not found or not a directory: {resolved_references_dir}")
 
@@ -1327,6 +1348,104 @@ def plugin_skill(
             return PluginSkill(name, skill_path, description.strip(), True, resolved_references_dir)
         raise FileNotFoundError(f"SKILL.md not found at {skill_path}")
     return PluginSkill(name, skill_path, description.strip(), bool(optional), resolved_references_dir)
+
+
+def _default_reference_tool_name(skill_name: str) -> str:
+    """Derive a tool name that satisfies _TOOL_NAME_RE from any valid skill name.
+
+    plugin_skill()'s own _SKILL_NAME_RE (``[a-zA-Z0-9_-]+``) is looser than the tool-name pattern
+    (``[a-z][a-z0-9_]*``) -- it permits uppercase letters and a leading digit that a bare
+    hyphen-to-underscore substitution would carry straight into an invalid tool name.
+    """
+    normalized = re.sub(r"[^a-z0-9_]", "_", skill_name.lower())
+    if not normalized or not normalized[0].isalpha():
+        normalized = f"skill_{normalized}"
+    return f"{normalized}_read_reference"
+
+
+def plugin_reference_tool(
+    skill: PluginSkill,
+    *,
+    toolset: str,
+    name: str | None = None,
+    description: str | None = None,
+) -> Callable:
+    """Build a ``@tool``-decorated handler that lists or reads ``skill.references_dir``.
+
+    Companion-file support in ``register_skill`` (see ``references_dir`` on :func:`plugin_skill`)
+    is forward-compatible groundwork only -- no released Hermes Agent host serves those files to
+    the agent yet. This factory sidesteps that gap entirely: it builds an ordinary tool, using the
+    same ``@tool``/``register_plugin`` mechanism every other plugin capability already goes
+    through, so the agent can read the directory's contents today on any host, regardless of
+    ``register_skill`` support.
+
+    Call with no arguments (or ``file_path=None``) to list every file under ``references_dir``.
+    Call with ``file_path`` set to a path relative to ``references_dir`` to read that file's
+    content; a path that resolves outside ``references_dir`` (including via a symlink) is
+    rejected.
+
+    Returns a ready-to-register tool function -- include it in the plugin's own declarations
+    passed to ``register_plugin``. Raises :class:`ValueError` immediately if ``skill`` has no
+    ``references_dir``, or if that directory isn't actually scoped inside the skill's own
+    directory (re-checked here even though :func:`plugin_skill` already enforces it, since
+    :class:`PluginSkill` is a public dataclass a caller could construct directly, bypassing that
+    factory).
+
+    Reads are not TOCTOU-safe against a filesystem with concurrent writers: the containment check
+    and the eventual read are separate syscalls against the same path string, not a held file
+    descriptor. Fine for the common case (a static, developer-authored directory shipped with the
+    plugin); if ``references_dir`` can be written to by an untrusted process at runtime, this
+    factory is not sufficient on its own.
+    """
+    if skill.references_dir is None:
+        raise ValueError(f"plugin_reference_tool requires a references_dir on skill {skill.name!r}")
+    _require_references_dir_within_skill(skill.path, skill.references_dir)
+
+    references_dir = skill.references_dir
+    tool_name = name or _default_reference_tool_name(skill.name)
+    tool_description = description or (
+        f"List or read companion reference files for the {skill.name!r} skill. Omit file_path "
+        "to list every available file; pass file_path to read one file's content."
+    )
+
+    def _read_plugin_reference(args: dict, **_: Any) -> dict:
+        file_path = args.get("file_path")
+        resolved_root = references_dir.resolve()
+        if not file_path:
+            files = sorted(
+                candidate.relative_to(resolved_root).as_posix()
+                for candidate in resolved_root.rglob("*")
+                if candidate.is_file()
+            )
+            return {"references_dir": str(references_dir), "files": files}
+
+        if not isinstance(file_path, str):
+            raise TypeError(f"file_path must be a string, got {type(file_path).__name__}")
+
+        candidate = (references_dir / file_path).resolve()
+        try:
+            candidate.relative_to(resolved_root)
+        except ValueError:
+            raise ValueError(f"file_path {file_path!r} escapes references_dir") from None
+        if not candidate.is_file():
+            raise FileNotFoundError(f"file_path {file_path!r} not found under references_dir")
+        return {"file_path": file_path, "content": candidate.read_text(encoding="utf-8")}
+
+    return tool(
+        toolset=toolset,
+        name=tool_name,
+        description=tool_description,
+        params={
+            "file_path": {
+                "type": "string",
+                "description": (
+                    "Relative path within the skill's references directory. Omit to list "
+                    "available files."
+                ),
+            },
+        },
+        validate_required=False,
+    )(_read_plugin_reference)
 
 
 def get_subagent_lifecycle(ctx: Any) -> Any:
