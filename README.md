@@ -526,6 +526,33 @@ The validator covers Hermes platform, conditional activation, config,
 blueprint, environment-variable, and credential-file metadata shapes. Runtime
 activation and setup behavior remain owned by Hermes Agent.
 
+`plugin_skill` also accepts an optional `references_dir` for a companion
+directory of reference files sibling to `SKILL.md` (Hermes' own convention
+names these `references`, `templates`, `assets`, or `scripts`, but any
+directory name is accepted). It is validated the same way `SKILL.md` is —
+required unless the skill itself is `optional`, in which case a missing
+directory is dropped with a warning instead of raising:
+
+```python
+plugin_skill(
+    "temporal-awareness",
+    Path(__file__).with_name("SKILL.md"),
+    "Calibrate responses against local time and message gaps.",
+    references_dir=Path(__file__).with_name("references"),
+)
+```
+
+**This is forward-compatible groundwork, not yet an effective capability.**
+`register_plugin` only forwards `references_dir` to `ctx.register_skill` when
+the host's own signature accepts that parameter (checked at registration
+time via `inspect.signature`, so older hosts are never called with an
+argument they don't understand). As of this writing, no released Hermes
+Agent host reads or serves plugin-skill companion files, so declaring
+`references_dir` today does not make the directory agent-visible — a
+warning is logged naming the skill so the gap stays visible instead of
+silently doing nothing. Once a host adds support, plugins that already
+declare `references_dir` start working with no further kit-side change.
+
 ## Subagents and specialized providers
 
 Subagent lifecycle supervision is host-owned. Use the checked accessor instead

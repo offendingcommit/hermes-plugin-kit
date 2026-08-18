@@ -62,7 +62,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dataclass_replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
@@ -391,6 +391,7 @@ class PluginSkill:
     path: Path
     description: str
     optional: bool = False
+    references_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1262,8 +1263,21 @@ def plugin_skill(
     path: str | Path,
     description: str,
     optional: bool = False,
+    references_dir: str | Path | None = None,
 ) -> PluginSkill:
-    """Declare a plugin-owned ``SKILL.md`` for :func:`register_plugin`."""
+    """Declare a plugin-owned ``SKILL.md`` for :func:`register_plugin`.
+
+    ``references_dir``, when given, is a directory of companion reference files sibling to
+    ``SKILL.md`` (Hermes' own convention names these ``references``, ``templates``, ``assets``,
+    or ``scripts``, but any directory name is accepted here). It is validated and carried on the
+    returned :class:`PluginSkill`, then passed to the host's ``register_skill`` **only when the
+    host's own signature accepts it** -- as of this writing, no released ``hermes-agent`` host
+    surfaces plugin-skill companion files, so declaring ``references_dir`` today does not yet make
+    the directory agent-visible. It is forward-compatible groundwork: once a host adds support,
+    plugins that already declare ``references_dir`` start working with no further kit-side change.
+    Until then, ``register_plugin`` logs a warning naming the skill so the gap stays visible rather
+    than silently doing nothing.
+    """
     if not isinstance(name, str) or not _SKILL_NAME_RE.fullmatch(name):
         raise ValueError("skill name must match [a-zA-Z0-9_-]+ and contain no namespace")
     skill_path = Path(path)
@@ -1271,13 +1285,22 @@ def plugin_skill(
         raise ValueError("skill path must point to SKILL.md")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("skill description is required")
+
+    resolved_references_dir: Path | None = None
+    if references_dir is not None:
+        resolved_references_dir = Path(references_dir)
+        if not resolved_references_dir.is_dir():
+            if not optional:
+                raise NotADirectoryError(f"references_dir not found or not a directory: {resolved_references_dir}")
+            resolved_references_dir = None
+
     try:
         _validate_plugin_skill_file(name, skill_path, description)
     except FileNotFoundError:
         if optional:
-            return PluginSkill(name, skill_path, description.strip(), True)
+            return PluginSkill(name, skill_path, description.strip(), True, resolved_references_dir)
         raise FileNotFoundError(f"SKILL.md not found at {skill_path}")
-    return PluginSkill(name, skill_path, description.strip(), bool(optional))
+    return PluginSkill(name, skill_path, description.strip(), bool(optional), resolved_references_dir)
 
 
 def get_subagent_lifecycle(ctx: Any) -> Any:
@@ -2218,17 +2241,28 @@ def register_plugin(
         skill = declared_skills[name]
         try:
             _validate_plugin_skill_file(skill.name, skill.path, skill.description)
-            available_skills.append(skill)
-            continue
         except FileNotFoundError:
             if not skill.optional:
                 raise FileNotFoundError(f"SKILL.md not found at {skill.path}")
-        log.warning(
-            "hermes_plugin_kit: optional skill missing; name=%s; path=%s",
-            skill.name,
-            skill.path,
-        )
-        skipped_skills.append(name)
+            log.warning(
+                "hermes_plugin_kit: optional skill missing; name=%s; path=%s",
+                skill.name,
+                skill.path,
+            )
+            skipped_skills.append(name)
+            continue
+        if skill.references_dir is not None and not skill.references_dir.is_dir():
+            if not skill.optional:
+                raise NotADirectoryError(
+                    f"references_dir not found or not a directory: {skill.references_dir}"
+                )
+            log.warning(
+                "hermes_plugin_kit: optional skill's references_dir missing; name=%s; references_dir=%s",
+                skill.name,
+                skill.references_dir,
+            )
+            skill = _dataclass_replace(skill, references_dir=None)
+        available_skills.append(skill)
 
     required_registrars = {
         "register_command": slash_commands,
@@ -2357,11 +2391,31 @@ def register_plugin(
 
     registered_skills: list[str] = []
     for skill in available_skills:
-        ctx.register_skill(
-            name=skill.name,
-            path=skill.path,
-            description=skill.description,
-        )
+        skill_kwargs: dict[str, Any] = {
+            "name": skill.name,
+            "path": skill.path,
+            "description": skill.description,
+        }
+        if skill.references_dir is not None:
+            try:
+                register_skill_params = inspect.signature(ctx.register_skill).parameters
+                host_accepts_references_dir = "references_dir" in register_skill_params or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in register_skill_params.values()
+                )
+            except (TypeError, ValueError):
+                host_accepts_references_dir = False
+            if host_accepts_references_dir:
+                skill_kwargs["references_dir"] = skill.references_dir
+            else:
+                log.warning(
+                    "hermes_plugin_kit: host register_skill() does not yet accept references_dir; "
+                    "name=%s references_dir=%s will not be surfaced to the agent until the host "
+                    "adds support",
+                    skill.name,
+                    skill.references_dir,
+                )
+        ctx.register_skill(**skill_kwargs)
         registered_skills.append(skill.name)
 
     registered_memory_providers: list[str] = []
