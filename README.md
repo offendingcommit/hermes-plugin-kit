@@ -526,6 +526,75 @@ The validator covers Hermes platform, conditional activation, config,
 blueprint, environment-variable, and credential-file metadata shapes. Runtime
 activation and setup behavior remain owned by Hermes Agent.
 
+`plugin_skill` also accepts an optional `references_dir` for a companion
+directory of reference files sibling to `SKILL.md` (Hermes' own convention
+names these `references`, `templates`, `assets`, or `scripts`, but any
+directory name is accepted) — as long as it's actually inside the skill's
+own directory tree (any depth of subdirectory is fine; a path outside it,
+including via a symlink, raises `ValueError` immediately, regardless of
+`optional`). Without that check, `references_dir` would accept literally any
+directory, and `plugin_reference_tool` (below) would then expose that entire
+tree for reading. Existence, in contrast, follows the same required/optional
+split as `SKILL.md`: a required (non-`optional`) skill whose `references_dir`
+doesn't exist raises `NotADirectoryError` immediately from `plugin_skill`,
+the directory counterpart to `SKILL.md`'s own `FileNotFoundError`. An
+`optional` skill's `references_dir` existence isn't checked at declaration
+time at all — it's carried as declared and checked once, during
+`register_plugin`, which logs a warning and drops it if still missing
+(checking it twice would silence that warning the second time):
+
+```python
+plugin_skill(
+    "temporal-awareness",
+    Path(__file__).with_name("SKILL.md"),
+    "Calibrate responses against local time and message gaps.",
+    references_dir=Path(__file__).with_name("references"),
+)
+```
+
+**This is forward-compatible groundwork, not yet an effective capability.**
+`register_plugin` only forwards `references_dir` to `ctx.register_skill` when
+the host's own signature accepts that parameter (checked at registration
+time via `inspect.signature`, so older hosts are never called with an
+argument they don't understand). That check is a best-effort probe, not a
+guarantee — a host reached through a generic `**kwargs` shape (a decorator
+applied without `functools.wraps`, or a test double built with a bare
+`Mock(spec=...)` instead of `create_autospec(...)`) can report acceptance it
+doesn't actually have, so `register_plugin` also retries once without
+`references_dir` if the host rejects it at call time, logging a warning
+either way. As of this writing, no released Hermes Agent host reads or
+serves plugin-skill companion files, so declaring `references_dir` today
+does not make the directory agent-visible. Once a host adds support, plugins
+that already declare `references_dir` start working with no further
+kit-side change.
+
+**`plugin_reference_tool` makes the directory agent-visible today, without
+waiting on a host.** It builds an ordinary `@tool`-decorated function — no
+`register_skill` involvement at all — that lists or reads files under a
+skill's `references_dir`:
+
+```python
+reader = plugin_reference_tool(skill, toolset="temporal-awareness")
+# tool name defaults to "<skill-name>_read_reference"; pass name=/description=
+# to override either. Include `reader` in the plugin's own declarations
+# passed to register_plugin, exactly like any other @tool function.
+```
+
+Called with no `file_path`, it returns every file under `references_dir`
+(recursively, as relative POSIX paths). Called with `file_path` set to a
+path relative to `references_dir`, it returns that file's content. A
+`file_path` that resolves outside `references_dir` — including through a
+symlink, an absolute path, or a `../` chain — is rejected rather than
+followed; a non-string `file_path` is rejected with a clean error instead of
+an internal exception. `plugin_reference_tool` re-checks that
+`references_dir` is scoped inside the skill's own directory even though
+`plugin_skill` already enforces it, since `PluginSkill` is a public
+dataclass a caller could construct directly, bypassing that factory. It is
+not TOCTOU-safe against a `references_dir` writable by an untrusted process
+at runtime — fine for the common case of a static directory shipped with
+the plugin, insufficient if that assumption doesn't hold for a given
+deployment.
+
 ## Subagents and specialized providers
 
 Subagent lifecycle supervision is host-owned. Use the checked accessor instead

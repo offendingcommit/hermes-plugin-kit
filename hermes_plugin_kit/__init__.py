@@ -62,7 +62,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dataclass_replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
@@ -190,6 +190,26 @@ def _call_session_db(
             f"{method_name}() does not accept the required arguments: {exc}"
         ) from exc
     return method(*args, **kwargs)
+
+
+def _signature_accepts_kwarg(callable_obj: Any, name: str) -> bool:
+    """Return whether ``callable_obj``'s live signature has ``name`` or accepts ``**kwargs``.
+
+    Shared probe for "evolving host API" call sites (see :func:`_call_session_db_evolving` for
+    the sibling pattern with multi-kwarg, fail-loud semantics). This variant is single-kwarg and
+    fails soft (returns ``False``) when the signature can't be introspected -- callers that want
+    graceful degradation should always pair this with a try/except around the actual call, since
+    a permissive ``**kwargs`` shape (a bare ``Mock(spec=...)``, or a decorator without
+    ``functools.wraps``) can make this probe report ``True`` for a host that will still reject the
+    keyword argument at call time.
+    """
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
 
 
 def _call_session_db_evolving(
@@ -391,6 +411,7 @@ class PluginSkill:
     path: Path
     description: str
     optional: bool = False
+    references_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1257,13 +1278,54 @@ def _validate_plugin_skill_file(
     _validate_hermes_skill_metadata(frontmatter)
 
 
+def _require_references_dir_within_skill(skill_path: Path, references_dir: Path) -> None:
+    """Reject a references_dir that isn't actually scoped to the skill's own directory.
+
+    references_dir accepts any directory by name -- without this check, a plugin author (by
+    mistake or otherwise) could point it at an unrelated, much larger directory (a home directory,
+    a mounted secrets volume, `/etc`), and plugin_reference_tool would then expose that entire
+    tree for reading, since its own path-traversal check only proves containment within whatever
+    directory it was handed, not that the directory itself is a legitimate skill companion folder.
+    Does not require either path to exist -- Path.resolve() normalizes non-existent paths too.
+    """
+    skill_dir = skill_path.resolve().parent
+    try:
+        references_dir.resolve().relative_to(skill_dir)
+    except ValueError:
+        raise ValueError(
+            f"references_dir must be inside the skill's own directory ({skill_dir}); "
+            f"got {references_dir}"
+        ) from None
+
+
 def plugin_skill(
     name: str,
     path: str | Path,
     description: str,
     optional: bool = False,
+    references_dir: str | Path | None = None,
 ) -> PluginSkill:
-    """Declare a plugin-owned ``SKILL.md`` for :func:`register_plugin`."""
+    """Declare a plugin-owned ``SKILL.md`` for :func:`register_plugin`.
+
+    ``references_dir``, when given, is a directory of companion reference files sibling to
+    ``SKILL.md`` (Hermes' own convention names these ``references``, ``templates``, ``assets``,
+    or ``scripts``, but any directory name is accepted here). A required (non-``optional``) skill
+    whose ``references_dir`` does not exist raises :class:`NotADirectoryError` immediately, the
+    same way a required, missing ``SKILL.md`` raises :class:`FileNotFoundError`. An ``optional``
+    skill's ``references_dir`` is *not* validated here -- it is carried on the returned
+    :class:`PluginSkill` as declared and re-checked once, by :func:`register_plugin`, which logs a
+    warning and drops it if still missing at registration time. (Validating and dropping it here
+    too would silence that warning permanently, since :func:`register_plugin`'s re-check only
+    fires when the field is still non-``None``.)
+
+    ``references_dir`` is passed to the host's ``register_skill`` **only when the host's own
+    signature accepts it** -- as of this writing, no released ``hermes-agent`` host surfaces
+    plugin-skill companion files, so declaring ``references_dir`` today does not yet make the
+    directory agent-visible. It is forward-compatible groundwork: once a host adds support,
+    plugins that already declare ``references_dir`` start working with no further kit-side change.
+    Until then, ``register_plugin`` logs a warning naming the skill so the gap stays visible rather
+    than silently doing nothing.
+    """
     if not isinstance(name, str) or not _SKILL_NAME_RE.fullmatch(name):
         raise ValueError("skill name must match [a-zA-Z0-9_-]+ and contain no namespace")
     skill_path = Path(path)
@@ -1271,13 +1333,119 @@ def plugin_skill(
         raise ValueError("skill path must point to SKILL.md")
     if not isinstance(description, str) or not description.strip():
         raise ValueError("skill description is required")
+
+    resolved_references_dir: Path | None = None
+    if references_dir is not None:
+        resolved_references_dir = Path(references_dir)
+        _require_references_dir_within_skill(skill_path, resolved_references_dir)
+        if not optional and not resolved_references_dir.is_dir():
+            raise NotADirectoryError(f"references_dir not found or not a directory: {resolved_references_dir}")
+
     try:
         _validate_plugin_skill_file(name, skill_path, description)
     except FileNotFoundError:
         if optional:
-            return PluginSkill(name, skill_path, description.strip(), True)
+            return PluginSkill(name, skill_path, description.strip(), True, resolved_references_dir)
         raise FileNotFoundError(f"SKILL.md not found at {skill_path}")
-    return PluginSkill(name, skill_path, description.strip(), bool(optional))
+    return PluginSkill(name, skill_path, description.strip(), bool(optional), resolved_references_dir)
+
+
+def _default_reference_tool_name(skill_name: str) -> str:
+    """Derive a tool name that satisfies _TOOL_NAME_RE from any valid skill name.
+
+    plugin_skill()'s own _SKILL_NAME_RE (``[a-zA-Z0-9_-]+``) is looser than the tool-name pattern
+    (``[a-z][a-z0-9_]*``) -- it permits uppercase letters and a leading digit that a bare
+    hyphen-to-underscore substitution would carry straight into an invalid tool name.
+    """
+    normalized = re.sub(r"[^a-z0-9_]", "_", skill_name.lower())
+    if not normalized or not normalized[0].isalpha():
+        normalized = f"skill_{normalized}"
+    return f"{normalized}_read_reference"
+
+
+def plugin_reference_tool(
+    skill: PluginSkill,
+    *,
+    toolset: str,
+    name: str | None = None,
+    description: str | None = None,
+) -> Callable:
+    """Build a ``@tool``-decorated handler that lists or reads ``skill.references_dir``.
+
+    Companion-file support in ``register_skill`` (see ``references_dir`` on :func:`plugin_skill`)
+    is forward-compatible groundwork only -- no released Hermes Agent host serves those files to
+    the agent yet. This factory sidesteps that gap entirely: it builds an ordinary tool, using the
+    same ``@tool``/``register_plugin`` mechanism every other plugin capability already goes
+    through, so the agent can read the directory's contents today on any host, regardless of
+    ``register_skill`` support.
+
+    Call with no arguments (or ``file_path=None``) to list every file under ``references_dir``.
+    Call with ``file_path`` set to a path relative to ``references_dir`` to read that file's
+    content; a path that resolves outside ``references_dir`` (including via a symlink) is
+    rejected.
+
+    Returns a ready-to-register tool function -- include it in the plugin's own declarations
+    passed to ``register_plugin``. Raises :class:`ValueError` immediately if ``skill`` has no
+    ``references_dir``, or if that directory isn't actually scoped inside the skill's own
+    directory (re-checked here even though :func:`plugin_skill` already enforces it, since
+    :class:`PluginSkill` is a public dataclass a caller could construct directly, bypassing that
+    factory).
+
+    Reads are not TOCTOU-safe against a filesystem with concurrent writers: the containment check
+    and the eventual read are separate syscalls against the same path string, not a held file
+    descriptor. Fine for the common case (a static, developer-authored directory shipped with the
+    plugin); if ``references_dir`` can be written to by an untrusted process at runtime, this
+    factory is not sufficient on its own.
+    """
+    if skill.references_dir is None:
+        raise ValueError(f"plugin_reference_tool requires a references_dir on skill {skill.name!r}")
+    _require_references_dir_within_skill(skill.path, skill.references_dir)
+
+    references_dir = skill.references_dir
+    tool_name = name or _default_reference_tool_name(skill.name)
+    tool_description = description or (
+        f"List or read companion reference files for the {skill.name!r} skill. Omit file_path "
+        "to list every available file; pass file_path to read one file's content."
+    )
+
+    def _read_plugin_reference(args: dict, **_: Any) -> dict:
+        file_path = args.get("file_path")
+        resolved_root = references_dir.resolve()
+        if not file_path:
+            files = sorted(
+                candidate.relative_to(resolved_root).as_posix()
+                for candidate in resolved_root.rglob("*")
+                if candidate.is_file()
+            )
+            return {"references_dir": str(references_dir), "files": files}
+
+        if not isinstance(file_path, str):
+            raise TypeError(f"file_path must be a string, got {type(file_path).__name__}")
+
+        candidate = (references_dir / file_path).resolve()
+        try:
+            candidate.relative_to(resolved_root)
+        except ValueError:
+            raise ValueError(f"file_path {file_path!r} escapes references_dir") from None
+        if not candidate.is_file():
+            raise FileNotFoundError(f"file_path {file_path!r} not found under references_dir")
+        return {"file_path": file_path, "content": candidate.read_text(encoding="utf-8")}
+
+    return tool(
+        toolset=toolset,
+        name=tool_name,
+        description=tool_description,
+        params={
+            "file_path": {
+                "type": "string",
+                "description": (
+                    "Relative path within the skill's references directory. Omit to list "
+                    "available files."
+                ),
+            },
+        },
+        validate_required=False,
+    )(_read_plugin_reference)
 
 
 def get_subagent_lifecycle(ctx: Any) -> Any:
@@ -2218,17 +2386,28 @@ def register_plugin(
         skill = declared_skills[name]
         try:
             _validate_plugin_skill_file(skill.name, skill.path, skill.description)
-            available_skills.append(skill)
-            continue
         except FileNotFoundError:
             if not skill.optional:
                 raise FileNotFoundError(f"SKILL.md not found at {skill.path}")
-        log.warning(
-            "hermes_plugin_kit: optional skill missing; name=%s; path=%s",
-            skill.name,
-            skill.path,
-        )
-        skipped_skills.append(name)
+            log.warning(
+                "hermes_plugin_kit: optional skill missing; name=%s; path=%s",
+                skill.name,
+                skill.path,
+            )
+            skipped_skills.append(name)
+            continue
+        if skill.references_dir is not None and not skill.references_dir.is_dir():
+            if not skill.optional:
+                raise NotADirectoryError(
+                    f"references_dir not found or not a directory: {skill.references_dir}"
+                )
+            log.warning(
+                "hermes_plugin_kit: optional skill's references_dir missing; name=%s; references_dir=%s",
+                skill.name,
+                skill.references_dir,
+            )
+            skill = _dataclass_replace(skill, references_dir=None)
+        available_skills.append(skill)
 
     required_registrars = {
         "register_command": slash_commands,
@@ -2357,11 +2536,44 @@ def register_plugin(
 
     registered_skills: list[str] = []
     for skill in available_skills:
-        ctx.register_skill(
-            name=skill.name,
-            path=skill.path,
-            description=skill.description,
-        )
+        skill_kwargs: dict[str, Any] = {
+            "name": skill.name,
+            "path": skill.path,
+            "description": skill.description,
+        }
+        wants_references_dir = skill.references_dir is not None
+        if wants_references_dir and _signature_accepts_kwarg(ctx.register_skill, "references_dir"):
+            skill_kwargs["references_dir"] = skill.references_dir
+        elif wants_references_dir:
+            log.warning(
+                "hermes_plugin_kit: host register_skill() does not yet accept references_dir; "
+                "name=%s references_dir=%s will not be surfaced to the agent until the host "
+                "adds support",
+                skill.name,
+                skill.references_dir,
+            )
+
+        # The signature probe above can be fooled by a permissive **kwargs shape (a bare
+        # Mock(spec=...) test double, or a decorator applied without functools.wraps) that
+        # reports acceptance the underlying host doesn't actually have. Retry once without
+        # references_dir on a TypeError naming it -- Python raises that error at argument
+        # binding, before the callee's body runs, so retrying is safe even if the host has
+        # side effects: the first, rejected call never entered the function.
+        try:
+            ctx.register_skill(**skill_kwargs)
+        except TypeError as exc:
+            if "references_dir" not in skill_kwargs or "references_dir" not in str(exc):
+                raise
+            log.warning(
+                "hermes_plugin_kit: host register_skill() reported it accepts references_dir "
+                "but rejected it at call time; name=%s references_dir=%s will not be surfaced "
+                "to the agent; error=%s",
+                skill.name,
+                skill.references_dir,
+                exc,
+            )
+            del skill_kwargs["references_dir"]
+            ctx.register_skill(**skill_kwargs)
         registered_skills.append(skill.name)
 
     registered_memory_providers: list[str] = []

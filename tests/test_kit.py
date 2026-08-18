@@ -1935,6 +1935,455 @@ class RegisterPluginTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate skill"):
             hpk.register_plugin(FakePluginCtx(), self._module(), skills=skills)
 
+    def test_plugin_skill_accepts_and_validates_references_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+
+        self.assertEqual(skill.references_dir, references_dir)
+
+    def test_plugin_skill_rejects_missing_references_dir_when_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+
+            with self.assertRaises(NotADirectoryError):
+                hpk.plugin_skill(
+                    "sample", skill_path, "Sample.", references_dir=Path(tmp) / "missing"
+                )
+
+    def test_plugin_skill_does_not_validate_references_dir_when_optional(self) -> None:
+        # Mirrors SKILL.md's own optional handling: plugin_skill() does not resolve or drop a
+        # missing optional references_dir -- it's carried as declared so register_plugin()'s
+        # later re-check (the only place that logs a warning) still sees it as non-None and
+        # actually fires. Validating here too would silence that warning permanently.
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            missing = Path(tmp) / "missing"
+
+            skill = hpk.plugin_skill(
+                "sample", skill_path, "Sample.", optional=True, references_dir=missing
+            )
+
+        self.assertEqual(skill.references_dir, missing)
+
+    def test_register_plugin_warns_and_drops_references_dir_missing_since_declaration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            skill = hpk.plugin_skill(
+                "sample",
+                skill_path,
+                "Sample.",
+                optional=True,
+                references_dir=Path(tmp) / "never-created",
+            )
+
+            ctx = FakePluginCtx()
+            with self.assertLogs(level="WARNING") as logs:
+                summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
+
+        self.assertEqual(summary.skills, ("sample",))
+        self.assertNotIn("references_dir", ctx.skills[0])
+        self.assertIn("references_dir missing", "\n".join(logs.output))
+
+    def test_register_plugin_passes_references_dir_to_a_host_that_accepts_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+
+            ctx = FakePluginCtx()
+            hpk.register_plugin(ctx, self._module(), skills=(skill,))
+
+        self.assertEqual(ctx.skills[0]["references_dir"], references_dir)
+
+    def test_register_plugin_falls_back_gracefully_when_host_lacks_references_dir_support(
+        self,
+    ) -> None:
+        class StrictHostCtx(FakePluginCtx):
+            """Mirrors today's real hermes-agent PluginContext.register_skill signature."""
+
+            def register_skill(self, name, path, description="") -> None:
+                self.skills.append({"name": name, "path": path, "description": description})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+
+            ctx = StrictHostCtx()
+            with self.assertLogs(level="WARNING") as logs:
+                hpk.register_plugin(ctx, self._module(), skills=(skill,))
+
+        self.assertNotIn("references_dir", ctx.skills[0])
+        self.assertIn("does not yet accept references_dir", "\n".join(logs.output))
+
+    def test_register_plugin_drops_references_dir_removed_after_declaration_for_optional_skill(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+            skill = hpk.plugin_skill(
+                "sample", skill_path, "Sample.", optional=True, references_dir=references_dir
+            )
+            references_dir.rmdir()
+
+            ctx = FakePluginCtx()
+            with self.assertLogs(level="WARNING") as logs:
+                summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
+
+        self.assertEqual(summary.skills, ("sample",))
+        self.assertNotIn("references_dir", ctx.skills[0])
+        self.assertIn("references_dir missing", "\n".join(logs.output))
+
+    def test_register_plugin_raises_when_required_references_dir_removed_after_declaration(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+            references_dir.rmdir()
+
+            with self.assertRaises(NotADirectoryError):
+                hpk.register_plugin(FakePluginCtx(), self._module(), skills=(skill,))
+
+    def test_register_plugin_treats_uninspectable_register_skill_as_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+
+            ctx = FakePluginCtx()
+            with (
+                patch.object(hpk, "inspect") as fake_inspect,
+                self.assertLogs(level="WARNING") as logs,
+            ):
+                fake_inspect.signature.side_effect = ValueError("no signature found")
+                fake_inspect.Parameter = inspect.Parameter
+                summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
+
+        self.assertEqual(summary.skills, ("sample",))
+        self.assertNotIn("references_dir", ctx.skills[0])
+        self.assertIn("does not yet accept references_dir", "\n".join(logs.output))
+
+    def test_register_plugin_passes_references_dir_to_a_host_with_an_explicit_parameter(
+        self,
+    ) -> None:
+        class ExplicitParamHostCtx(FakePluginCtx):
+            """A host whose register_skill names references_dir directly -- no **kwargs."""
+
+            def register_skill(self, name, path, description="", references_dir=None) -> None:
+                self.skills.append(
+                    {
+                        "name": name,
+                        "path": path,
+                        "description": description,
+                        "references_dir": references_dir,
+                    }
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+
+            ctx = ExplicitParamHostCtx()
+            hpk.register_plugin(ctx, self._module(), skills=(skill,))
+
+        self.assertEqual(ctx.skills[0]["references_dir"], references_dir)
+
+    def test_register_plugin_retries_without_references_dir_when_host_rejects_it_at_call_time(
+        self,
+    ) -> None:
+        # Simulates the probe being fooled: a **kwargs-shaped register_skill (a bare
+        # Mock(spec=...) or a decorator applied without functools.wraps produces this exact
+        # shape in practice) reports acceptance via inspect.signature, but the real
+        # implementation still raises TypeError for the unexpected keyword at call time.
+        class FooledProbeHostCtx(FakePluginCtx):
+            def register_skill(self, **kwargs) -> None:
+                if "references_dir" in kwargs:
+                    raise TypeError(
+                        "register_skill() got an unexpected keyword argument 'references_dir'"
+                    )
+                self.skills.append(kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+
+            ctx = FooledProbeHostCtx()
+            with self.assertLogs(level="WARNING") as logs:
+                summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
+
+        self.assertEqual(summary.skills, ("sample",))
+        self.assertEqual(len(ctx.skills), 1)
+        self.assertNotIn("references_dir", ctx.skills[0])
+        self.assertIn("rejected it at call time", "\n".join(logs.output))
+
+    def test_register_plugin_reraises_unrelated_type_errors_from_register_skill(self) -> None:
+        class BrokenHostCtx(FakePluginCtx):
+            def register_skill(self, **kwargs) -> None:
+                raise TypeError("register_skill() missing 1 required positional argument")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text(
+                "---\nname: sample\ndescription: Sample.\n---\n# Sample\n"
+            )
+            references_dir = Path(tmp) / "references"
+            references_dir.mkdir()
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+
+            with self.assertRaises(TypeError):
+                hpk.register_plugin(BrokenHostCtx(), self._module(), skills=(skill,))
+
+
+class PluginReferenceToolTests(unittest.TestCase):
+    def _skill_with_references(self, tmp: str, **files: str) -> hpk.PluginSkill:
+        skill_path = Path(tmp) / "SKILL.md"
+        skill_path.write_text("---\nname: sample\ndescription: Sample.\n---\n# Sample\n")
+        references_dir = Path(tmp) / "references"
+        references_dir.mkdir()
+        for relative, content in files.items():
+            target = references_dir / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        return hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
+
+    def test_requires_a_references_dir_on_the_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_path = Path(tmp) / "SKILL.md"
+            skill_path.write_text("---\nname: sample\ndescription: Sample.\n---\n# Sample\n")
+            skill = hpk.plugin_skill("sample", skill_path, "Sample.")
+
+            with self.assertRaisesRegex(ValueError, "requires a references_dir"):
+                hpk.plugin_reference_tool(skill, toolset="sample")
+
+    def test_plugin_skill_rejects_a_references_dir_outside_the_skills_own_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as skill_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            skill_path = Path(skill_tmp) / "SKILL.md"
+            skill_path.write_text("---\nname: sample\ndescription: Sample.\n---\n# Sample\n")
+
+            with self.assertRaisesRegex(ValueError, "inside the skill's own directory"):
+                hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=Path(outside_tmp))
+
+    def test_plugin_reference_tool_rejects_out_of_scope_references_dir_from_direct_construction(
+        self,
+    ) -> None:
+        # plugin_skill() already rejects this; PluginSkill is a public dataclass a caller could
+        # construct directly, bypassing that factory -- plugin_reference_tool() must not trust it.
+        with tempfile.TemporaryDirectory() as skill_tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            skill_path = Path(skill_tmp) / "SKILL.md"
+            skill_path.write_text("---\nname: sample\ndescription: Sample.\n---\n# Sample\n")
+            skill = hpk.PluginSkill("sample", skill_path, "Sample.", False, Path(outside_tmp))
+
+            with self.assertRaisesRegex(ValueError, "inside the skill's own directory"):
+                hpk.plugin_reference_tool(skill, toolset="sample")
+
+    def test_derives_a_valid_tool_name_from_a_skill_name_with_uppercase_and_leading_digit(
+        self,
+    ) -> None:
+        for skill_name in ("Sample-Skill", "2fa-setup"):
+            with self.subTest(skill_name=skill_name), tempfile.TemporaryDirectory() as tmp:
+                skill_path = Path(tmp) / "SKILL.md"
+                skill_path.write_text(
+                    f"---\nname: {skill_name}\ndescription: Sample.\n---\n# Sample\n"
+                )
+                references_dir = Path(tmp) / "references"
+                references_dir.mkdir()
+                skill = hpk.plugin_skill(
+                    skill_name, skill_path, "Sample.", references_dir=references_dir
+                )
+
+                reader = hpk.plugin_reference_tool(skill, toolset="sample")
+                ctx = FakePluginCtx()
+                hpk.register_plugin(ctx, self._module(reader=reader), skills=(skill,))
+
+                self.assertEqual(1, len(ctx.tools))
+                self.assertRegex(ctx.tools[0]["name"], r"^[a-z][a-z0-9_]*$")
+
+    def test_rejects_an_absolute_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = Path(tmp) / "secret.txt"
+            secret.write_text("do not read me")
+            skill = self._skill_with_references(tmp, **{"a.md": "hi"})
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            payload = json.loads(reader({"file_path": str(secret)}))
+
+        self.assertFalse(payload["success"])
+        self.assertIn("escapes references_dir", payload["error"])
+
+    def test_rejects_a_non_string_file_path_with_a_clean_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(tmp, **{"a.md": "hi"})
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            for bad_file_path in (5, ["a.md"], {"x": 1}):
+                with self.subTest(file_path=bad_file_path):
+                    payload = json.loads(reader({"file_path": bad_file_path}))
+                    self.assertFalse(payload["success"])
+                    self.assertIn("file_path must be a string", payload["error"])
+
+    def test_lists_an_empty_directory_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(tmp)
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            payload = json.loads(reader({}))
+
+        self.assertTrue(payload["success"])
+        self.assertEqual([], payload["data"]["files"])
+
+    def test_rejects_a_directory_passed_as_file_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(tmp, **{"nested/a.md": "hi"})
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            payload = json.loads(reader({"file_path": "nested"}))
+
+        self.assertFalse(payload["success"])
+        self.assertIn("not found", payload["error"])
+
+    def test_derives_a_default_name_and_lists_files_when_file_path_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(
+                tmp, **{"a.md": "A", "nested/b.md": "B"}
+            )
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            ctx = FakePluginCtx()
+            hpk.register_plugin(ctx, self._module(reader=reader), skills=(skill,))
+            self.assertEqual(["sample_read_reference"], [item["name"] for item in ctx.tools])
+
+            payload = json.loads(reader({}))
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(["a.md", "nested/b.md"], payload["data"]["files"])
+
+    def test_reads_a_specific_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(tmp, **{"a.md": "hello world"})
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            payload = json.loads(reader({"file_path": "a.md"}))
+
+        self.assertTrue(payload["success"])
+        self.assertEqual("hello world", payload["data"]["content"])
+
+    def test_accepts_custom_name_and_description(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(tmp, **{"a.md": "hi"})
+            reader = hpk.plugin_reference_tool(
+                skill, toolset="sample", name="custom_reader", description="Custom description."
+            )
+
+            ctx = FakePluginCtx()
+            hpk.register_plugin(ctx, self._module(reader=reader), skills=(skill,))
+
+        self.assertEqual(1, len(ctx.tools))
+        self.assertEqual("custom_reader", ctx.tools[0]["name"])
+        self.assertEqual("Custom description.", ctx.tools[0]["schema"]["description"])
+
+    def test_rejects_a_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(tmp, **{"a.md": "hi"})
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            payload = json.loads(reader({"file_path": "missing.md"}))
+
+        self.assertFalse(payload["success"])
+        self.assertIn("not found", payload["error"])
+
+    def test_rejects_relative_path_traversal_outside_references_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = Path(tmp) / "secret.txt"
+            secret.write_text("do not read me")
+            skill = self._skill_with_references(tmp, **{"a.md": "hi"})
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            payload = json.loads(reader({"file_path": "../secret.txt"}))
+
+        self.assertFalse(payload["success"])
+        self.assertIn("escapes references_dir", payload["error"])
+
+    def test_rejects_a_symlink_that_escapes_references_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = Path(tmp) / "secret.txt"
+            secret.write_text("do not read me")
+            skill = self._skill_with_references(tmp, **{"a.md": "hi"})
+            (skill.references_dir / "escape.txt").symlink_to(secret)
+
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+            payload = json.loads(reader({"file_path": "escape.txt"}))
+
+        self.assertFalse(payload["success"])
+        self.assertIn("escapes references_dir", payload["error"])
+
+    def test_registers_and_answers_through_register_plugin_like_any_other_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(tmp, **{"a.md": "hi"})
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            ctx = FakePluginCtx()
+            summary = hpk.register_plugin(ctx, self._module(reader=reader), skills=(skill,))
+
+        self.assertIn("sample_read_reference", summary.tools)
+        self.assertEqual({"sample_read_reference"}, {item["name"] for item in ctx.tools})
+
+    def _module(self, **attrs):
+        module = types.ModuleType("sample_plugin")
+        for name, value in attrs.items():
+            setattr(module, name, value)
+        return module
+
 
 if __name__ == "__main__":
     unittest.main()
