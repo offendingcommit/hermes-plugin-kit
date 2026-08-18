@@ -27,7 +27,7 @@ guidance, not a second implementation specification.
 | Session slash command | `@command` | `register_plugin` | Name is bare lowercase kebab-case; handler receives raw trailing text and may be sync or async. |
 | Request or execution middleware | `@middleware`, `MiddlewareKind` | `register_plugin` | Callback is synchronous; request phases replace payloads, execution phases call single-use `next_call`. |
 | Lifecycle hook | `@hook` | `register_plugin` | Hermes kwargs and return values pass through; exceptions are re-raised for Hermes isolation. |
-| Plugin-owned skill | `plugin_skill` | `register_plugin(..., skills=...)` | Hermes adds the plugin namespace; missing required skills fail, optional skills warn and skip. |
+| Plugin-owned skill | `plugin_skill` | `register_plugin(..., skills=...)` | Hermes adds the plugin namespace; missing required skills fail, optional skills warn and skip. Optional `references_dir` (a companion reference-files directory) is forward-compatible groundwork only — no released host surfaces it yet; see [`README.md`](../../../README.md#commands-middleware-hooks-and-plugin-skills). |
 | Context engine | Hermes `ContextEngine` instance | `register_plugin(..., context_engine=...)` | Singular native engine registration; schemas and recovery dispatch stay in `get_tool_schemas()` / `handle_tool_call()`, never duplicated with `@tool`. |
 | Host-managed call | `invoke_host_tool` | None | Use for supported non-registry capabilities such as `send_message`; pre/post-tool hooks remain active. |
 | Local media delivery | `MediaPayload`, `MediaType`, `deliver_media` | Consumer registers suppression hooks | File must be absolute, present, and non-empty; `origin` resolves from task-local Hermes context. |

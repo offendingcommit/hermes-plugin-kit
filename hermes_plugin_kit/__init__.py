@@ -192,6 +192,26 @@ def _call_session_db(
     return method(*args, **kwargs)
 
 
+def _signature_accepts_kwarg(callable_obj: Any, name: str) -> bool:
+    """Return whether ``callable_obj``'s live signature has ``name`` or accepts ``**kwargs``.
+
+    Shared probe for "evolving host API" call sites (see :func:`_call_session_db_evolving` for
+    the sibling pattern with multi-kwarg, fail-loud semantics). This variant is single-kwarg and
+    fails soft (returns ``False``) when the signature can't be introspected -- callers that want
+    graceful degradation should always pair this with a try/except around the actual call, since
+    a permissive ``**kwargs`` shape (a bare ``Mock(spec=...)``, or a decorator without
+    ``functools.wraps``) can make this probe report ``True`` for a host that will still reject the
+    keyword argument at call time.
+    """
+    try:
+        parameters = inspect.signature(callable_obj).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+    )
+
+
 def _call_session_db_evolving(
     db: Any,
     method_name: str,
@@ -1269,11 +1289,19 @@ def plugin_skill(
 
     ``references_dir``, when given, is a directory of companion reference files sibling to
     ``SKILL.md`` (Hermes' own convention names these ``references``, ``templates``, ``assets``,
-    or ``scripts``, but any directory name is accepted here). It is validated and carried on the
-    returned :class:`PluginSkill`, then passed to the host's ``register_skill`` **only when the
-    host's own signature accepts it** -- as of this writing, no released ``hermes-agent`` host
-    surfaces plugin-skill companion files, so declaring ``references_dir`` today does not yet make
-    the directory agent-visible. It is forward-compatible groundwork: once a host adds support,
+    or ``scripts``, but any directory name is accepted here). A required (non-``optional``) skill
+    whose ``references_dir`` does not exist raises :class:`NotADirectoryError` immediately, the
+    same way a required, missing ``SKILL.md`` raises :class:`FileNotFoundError`. An ``optional``
+    skill's ``references_dir`` is *not* validated here -- it is carried on the returned
+    :class:`PluginSkill` as declared and re-checked once, by :func:`register_plugin`, which logs a
+    warning and drops it if still missing at registration time. (Validating and dropping it here
+    too would silence that warning permanently, since :func:`register_plugin`'s re-check only
+    fires when the field is still non-``None``.)
+
+    ``references_dir`` is passed to the host's ``register_skill`` **only when the host's own
+    signature accepts it** -- as of this writing, no released ``hermes-agent`` host surfaces
+    plugin-skill companion files, so declaring ``references_dir`` today does not yet make the
+    directory agent-visible. It is forward-compatible groundwork: once a host adds support,
     plugins that already declare ``references_dir`` start working with no further kit-side change.
     Until then, ``register_plugin`` logs a warning naming the skill so the gap stays visible rather
     than silently doing nothing.
@@ -1289,10 +1317,8 @@ def plugin_skill(
     resolved_references_dir: Path | None = None
     if references_dir is not None:
         resolved_references_dir = Path(references_dir)
-        if not resolved_references_dir.is_dir():
-            if not optional:
-                raise NotADirectoryError(f"references_dir not found or not a directory: {resolved_references_dir}")
-            resolved_references_dir = None
+        if not optional and not resolved_references_dir.is_dir():
+            raise NotADirectoryError(f"references_dir not found or not a directory: {resolved_references_dir}")
 
     try:
         _validate_plugin_skill_file(name, skill_path, description)
@@ -2396,26 +2422,39 @@ def register_plugin(
             "path": skill.path,
             "description": skill.description,
         }
-        if skill.references_dir is not None:
-            try:
-                register_skill_params = inspect.signature(ctx.register_skill).parameters
-                host_accepts_references_dir = "references_dir" in register_skill_params or any(
-                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in register_skill_params.values()
-                )
-            except (TypeError, ValueError):
-                host_accepts_references_dir = False
-            if host_accepts_references_dir:
-                skill_kwargs["references_dir"] = skill.references_dir
-            else:
-                log.warning(
-                    "hermes_plugin_kit: host register_skill() does not yet accept references_dir; "
-                    "name=%s references_dir=%s will not be surfaced to the agent until the host "
-                    "adds support",
-                    skill.name,
-                    skill.references_dir,
-                )
-        ctx.register_skill(**skill_kwargs)
+        wants_references_dir = skill.references_dir is not None
+        if wants_references_dir and _signature_accepts_kwarg(ctx.register_skill, "references_dir"):
+            skill_kwargs["references_dir"] = skill.references_dir
+        elif wants_references_dir:
+            log.warning(
+                "hermes_plugin_kit: host register_skill() does not yet accept references_dir; "
+                "name=%s references_dir=%s will not be surfaced to the agent until the host "
+                "adds support",
+                skill.name,
+                skill.references_dir,
+            )
+
+        # The signature probe above can be fooled by a permissive **kwargs shape (a bare
+        # Mock(spec=...) test double, or a decorator applied without functools.wraps) that
+        # reports acceptance the underlying host doesn't actually have. Retry once without
+        # references_dir on a TypeError naming it -- Python raises that error at argument
+        # binding, before the callee's body runs, so retrying is safe even if the host has
+        # side effects: the first, rejected call never entered the function.
+        try:
+            ctx.register_skill(**skill_kwargs)
+        except TypeError as exc:
+            if "references_dir" not in skill_kwargs or "references_dir" not in str(exc):
+                raise
+            log.warning(
+                "hermes_plugin_kit: host register_skill() reported it accepts references_dir "
+                "but rejected it at call time; name=%s references_dir=%s will not be surfaced "
+                "to the agent; error=%s",
+                skill.name,
+                skill.references_dir,
+                exc,
+            )
+            del skill_kwargs["references_dir"]
+            ctx.register_skill(**skill_kwargs)
         registered_skills.append(skill.name)
 
     registered_memory_providers: list[str] = []

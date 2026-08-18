@@ -529,9 +529,14 @@ activation and setup behavior remain owned by Hermes Agent.
 `plugin_skill` also accepts an optional `references_dir` for a companion
 directory of reference files sibling to `SKILL.md` (Hermes' own convention
 names these `references`, `templates`, `assets`, or `scripts`, but any
-directory name is accepted). It is validated the same way `SKILL.md` is —
-required unless the skill itself is `optional`, in which case a missing
-directory is dropped with a warning instead of raising:
+directory name is accepted). It follows the same required/optional split as
+`SKILL.md`: a required (non-`optional`) skill whose `references_dir` is
+missing raises `NotADirectoryError` immediately from `plugin_skill`, the
+directory counterpart to `SKILL.md`'s own `FileNotFoundError`. An `optional`
+skill's `references_dir` isn't checked at declaration time at all — it's
+carried as declared and checked once, during `register_plugin`, which logs a
+warning and drops it if still missing (checking it twice would silence that
+warning the second time):
 
 ```python
 plugin_skill(
@@ -546,12 +551,17 @@ plugin_skill(
 `register_plugin` only forwards `references_dir` to `ctx.register_skill` when
 the host's own signature accepts that parameter (checked at registration
 time via `inspect.signature`, so older hosts are never called with an
-argument they don't understand). As of this writing, no released Hermes
-Agent host reads or serves plugin-skill companion files, so declaring
-`references_dir` today does not make the directory agent-visible — a
-warning is logged naming the skill so the gap stays visible instead of
-silently doing nothing. Once a host adds support, plugins that already
-declare `references_dir` start working with no further kit-side change.
+argument they don't understand). That check is a best-effort probe, not a
+guarantee — a host reached through a generic `**kwargs` shape (a decorator
+applied without `functools.wraps`, or a test double built with a bare
+`Mock(spec=...)` instead of `create_autospec(...)`) can report acceptance it
+doesn't actually have, so `register_plugin` also retries once without
+`references_dir` if the host rejects it at call time, logging a warning
+either way. As of this writing, no released Hermes Agent host reads or
+serves plugin-skill companion files, so declaring `references_dir` today
+does not make the directory agent-visible. Once a host adds support, plugins
+that already declare `references_dir` start working with no further
+kit-side change.
 
 ## Subagents and specialized providers
 
