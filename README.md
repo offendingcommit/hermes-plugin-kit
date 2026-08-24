@@ -582,7 +582,9 @@ reader = plugin_reference_tool(skill, toolset="temporal-awareness")
 
 Called with no `file_path`, it returns every file under `references_dir`
 (recursively, as relative POSIX paths). Called with `file_path` set to a
-path relative to `references_dir`, it returns that file's content. A
+path relative to `references_dir`, it returns that file's content. It also
+accepts the equivalent skill-relative `references/<path>` form commonly
+authored in `SKILL.md` files. A
 `file_path` that resolves outside `references_dir` — including through a
 symlink, an absolute path, or a `../` chain — is rejected rather than
 followed; a non-string `file_path` is rejected with a clean error instead of

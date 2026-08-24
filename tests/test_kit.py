@@ -2318,6 +2318,25 @@ class PluginReferenceToolTests(unittest.TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual("hello world", payload["data"]["content"])
 
+    def test_reads_skill_relative_paths_with_references_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            skill = self._skill_with_references(
+                tmp,
+                **{
+                    "a.md": "top-level",
+                    "nested/b.md": "nested",
+                },
+            )
+            reader = hpk.plugin_reference_tool(skill, toolset="sample")
+
+            top_level = json.loads(reader({"file_path": "references/a.md"}))
+            nested = json.loads(reader({"file_path": "references/nested/b.md"}))
+
+        self.assertTrue(top_level["success"])
+        self.assertEqual("top-level", top_level["data"]["content"])
+        self.assertTrue(nested["success"])
+        self.assertEqual("nested", nested["data"]["content"])
+
     def test_accepts_custom_name_and_description(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             skill = self._skill_with_references(tmp, **{"a.md": "hi"})
