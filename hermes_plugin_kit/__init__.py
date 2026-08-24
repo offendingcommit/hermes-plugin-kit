@@ -1381,8 +1381,9 @@ def plugin_reference_tool(
 
     Call with no arguments (or ``file_path=None``) to list every file under ``references_dir``.
     Call with ``file_path`` set to a path relative to ``references_dir`` to read that file's
-    content; a path that resolves outside ``references_dir`` (including via a symlink) is
-    rejected.
+    content. Skill-relative paths beginning with ``references/`` are accepted too, matching the
+    conventional paths authored in ``SKILL.md`` files. A path that resolves outside
+    ``references_dir`` (including via a symlink) is rejected.
 
     Returns a ready-to-register tool function -- include it in the plugin's own declarations
     passed to ``register_plugin``. Raises :class:`ValueError` immediately if ``skill`` has no
@@ -1405,7 +1406,8 @@ def plugin_reference_tool(
     tool_name = name or _default_reference_tool_name(skill.name)
     tool_description = description or (
         f"List or read companion reference files for the {skill.name!r} skill. Omit file_path "
-        "to list every available file; pass file_path to read one file's content."
+        "to list every available file; pass either a listed path or its skill-relative "
+        "references/<path> form to read one file's content."
     )
 
     def _read_plugin_reference(args: dict, **_: Any) -> dict:
@@ -1422,7 +1424,11 @@ def plugin_reference_tool(
         if not isinstance(file_path, str):
             raise TypeError(f"file_path must be a string, got {type(file_path).__name__}")
 
-        candidate = (references_dir / file_path).resolve()
+        path = Path(file_path)
+        if path.parts[:1] == ("references",):
+            path = Path(*path.parts[1:])
+
+        candidate = (references_dir / path).resolve()
         try:
             candidate.relative_to(resolved_root)
         except ValueError:
