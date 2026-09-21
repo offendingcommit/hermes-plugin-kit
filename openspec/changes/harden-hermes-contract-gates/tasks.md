@@ -28,23 +28,23 @@
 
 ## 2. Blocking gate and scheduled drift lane (U6)
 
-- [ ] 2.1 Point the blocking pinned job at the full contract suite. Verify: it
+- [x] 2.1 Point the blocking pinned job at the full contract suite. Verify: it
       passes at the pin and the suite it runs is the whole module, not the
       context-engine one.
-- [ ] 2.2 Collapse the two pin literals to one. Verify: the workflow names the
+- [x] 2.2 Collapse the two pin literals to one. Verify: the workflow names the
       pin exactly once.
-- [ ] 2.3 Move the drift lane into its own workflow on a daily schedule plus
+- [x] 2.3 Move the drift lane into its own workflow on a daily schedule plus
       manual dispatch, outside required checks, with no `continue-on-error`.
       Verify: a manual dispatch runs, and a failure is visibly red without
       affecting any required check.
-- [ ] 2.4 Report the upstream revision and failing tests to the run summary, on
+- [x] 2.4 Report the upstream revision and failing tests to the run summary, on
       a step that runs even after the contract step fails. Verify: a failing
       dispatch still produces the summary, rather than skipping the step that
       reports the failure.
-- [ ] 2.5 Add the known-drift baseline and classify failures against it by
+- [x] 2.5 Add the known-drift baseline and classify failures against it by
       fingerprint. Verify: the #99220 media failure is labelled known, and an
       unrecognized failure appears under its own heading.
-- [ ] 2.6 Add an activity trigger alongside the schedule. Verify: the workflow
+- [x] 2.6 Add an activity trigger alongside the schedule. Verify: the workflow
       has a trigger other than the clock, so 60 days of quiet cannot silently
       disable the alarm.
 

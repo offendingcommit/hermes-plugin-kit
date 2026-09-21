@@ -1,0 +1,75 @@
+---
+# yamllint disable rule:line-length rule:truthy
+#
+# Early warning that upstream hermes-agent has broken this kit's contract.
+#
+# This lives in its own workflow rather than as a job in test.yml for two
+# reasons. test.yml triggers on push and pull_request, so a job there runs when
+# *this* repository changes and never when Hermes moves -- the only event the
+# lane exists to detect. And job-level `continue-on-error` renders a failed job
+# green in the checks list, so even a run that fired and failed read as a pass.
+#
+# Nothing here is a required check, so a red run cannot block a merge. That
+# keeps the non-blocking property without needing a flag that hides the result.
+name: hermes-drift
+
+on:
+  schedule:
+    # Daily. The requirement states a 24-hour worst-case detection lag, so the
+    # cadence is part of the contract rather than an implementation detail.
+    - cron: "17 6 * * *"
+  # Scheduled workflows are disabled after 60 days without repository activity
+  # on a public repo -- exactly the quiet period this alarm guards. A push
+  # trigger keeps it alive. It does not fully remove the risk.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hermes-drift
+  cancel-in-progress: true
+
+jobs:
+  upstream-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        with:
+          repository: NousResearch/hermes-agent
+          path: .hermes-agent-upstream
+      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3  # v4
+        with:
+          just-version: "1.58.0"
+      - name: Record the upstream revision under test
+        id: upstream
+        run: |
+          rev="$(git -C .hermes-agent-upstream rev-parse HEAD)"
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+      - name: Run the contract suite against upstream
+        id: contract
+        env:
+          HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent-upstream
+        run: |
+          just test-contract-upstream > contract.log 2>&1
+          echo "EXIT=$?" >> contract.log
+        continue-on-error: true
+      # `outcome` is the result before continue-on-error is applied;
+      # `conclusion` is after. Keying on outcome is what makes this step see a
+      # failure at all. Without a run-after-failure condition the reporting
+      # step would be skipped by the very failure it exists to report.
+      - name: Classify and report drift
+        if: always()
+        run: |
+          python3 scripts/classify_drift.py contract.log "${{ steps.upstream.outputs.revision }}" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          new_drift=${PIPESTATUS[0]}
+          tail -40 contract.log >> "$GITHUB_STEP_SUMMARY" || true
+          exit "$new_drift"
