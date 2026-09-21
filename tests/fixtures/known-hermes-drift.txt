@@ -1,0 +1,17 @@
+# Contract failures against upstream Hermes that are known and accepted.
+#
+# Without this the drift lane names the same failure on every run, and within a
+# week nobody reads it -- at which point the next genuinely new break arrives as
+# one more line in a channel that has been failing since day one.
+#
+# Format: one entry per line, `<test id> <fingerprint>`.
+#
+# The fingerprint is a short, stable digest of the failure's own text, not just
+# the test id. A baselined test whose assertion or error has *changed* is a new
+# break wearing a known name, and matching on the name alone would file it as
+# expected. Change the failure, and it stops matching.
+#
+# Remove an entry when the underlying break is fixed. An entry that no longer
+# matches any failure is reported, so this file cannot rot quietly.
+
+tests.test_hermes_contract.HermesContractTests.test_host_tool_invocation_reaches_real_telegram_media_contract refusing-to-send-to-telegram-relay-routing
