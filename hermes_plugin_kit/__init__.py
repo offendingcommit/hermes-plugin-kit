@@ -67,6 +67,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
 
+from . import testing
 from .observability import (
     ObservabilityEvent,
     credential_identity_hash,
@@ -119,6 +120,10 @@ __all__ = [
     "credential_identity_hash",
     "log_observability_event",
     "new_correlation_id",
+    # Consumer-facing test support. The submodule is the public name rather than
+    # its individual classes, so test doubles stay out of the runtime namespace
+    # (the shape django.test and starlette.testclient take).
+    "testing",
 ]
 
 _SPEC_ATTR = "_hpk_tool_spec"

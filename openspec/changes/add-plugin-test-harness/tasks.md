@@ -1,20 +1,20 @@
 ## 1. Recording fake and drift replay (U2)
 
-- [ ] 1.1 Add the flat `hermes_plugin_kit/testing.py` module and re-export it
+- [x] 1.1 Add the flat `hermes_plugin_kit/testing.py` module and re-export it
       from the package root, following the `observability.py` precedent.
       Verify: the module imports from the package root in a fresh interpreter.
-- [ ] 1.2 Write the failing drift tests first — added required parameter,
+- [x] 1.2 Write the failing drift tests first — added required parameter,
       renamed parameter, removed registrar — against simulated host shapes.
       Verify: each fails for its intended reason before any implementation.
-- [ ] 1.3 Implement the recording fake, carrying plugin name and config as
+- [x] 1.3 Implement the recording fake, carrying plugin name and config as
       first-class constructor arguments so `load_plugin_config` and the receipt
       identity resolve. Verify: the three drift tests pass and the unchanged-host
       case reports clean.
-- [ ] 1.4 Add the `references_dir`-unsupported mode and the missing-registrar
+- [x] 1.4 Add the `references_dir`-unsupported mode and the missing-registrar
       mode, so both branches of the kit's capability probe are exercisable.
       Verify: the probe takes its retry branch and the unsupported-context error
       raises, each under its own test.
-- [ ] 1.5 Expose the deployed Hermes revision as a module constant, and keep
+- [x] 1.5 Expose the deployed Hermes revision as a module constant, and keep
       every Hermes import lazy. Verify: importing the module pulls in neither
       hermes-agent nor a test framework.
 
