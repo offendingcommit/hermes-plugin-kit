@@ -8,6 +8,7 @@ about not having checked, and reachable from an installed package.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -421,6 +422,69 @@ class RegistrationCheckTests(unittest.TestCase):
         hpk.register_plugin(ctx, [self._tool("probe_ok")], plugin_name="probe-plugin")
 
         self.assertTrue(hpk_testing.check_registration(ctx).ok)
+
+
+#: Names the Surface Map documents that the kit deliberately does not export.
+#:
+#: Keep this short and justified. Every entry is a name the table mentions
+#: because a plugin author needs it, but which the kit does not own.
+HOST_OWNED_NAMES = {
+    # Hermes' own class; the kit takes an instance, it does not provide one.
+    "ContextEngine",
+}
+
+
+def _documented_kit_api_names(reference: Path) -> set[str]:
+    """Backticked identifiers in the Surface Map's `Kit API` column.
+
+    That table is the one place the kit enumerates its own public surface. The
+    README is not usable for this: it has no API section, and its prose names
+    host-side calls like `ctx.register_tool` that would fail this guard falsely.
+    """
+    names: set[str] = set()
+    for line in reference.read_text().splitlines():
+        if not line.startswith("| ") or line.count("|") < 5:
+            continue
+        column = line.split("|")[2]
+        for identifier in re.findall(r"`([^`]+)`", column):
+            names.add(identifier.lstrip("@"))
+    return names
+
+
+class PublicSurfaceGuardTests(unittest.TestCase):
+    """A documented name that is not exported is unreachable for a consumer."""
+
+    REFERENCE = (
+        Path(__file__).parents[1] / "skills" / "hermes-plugins" / "references" / "plugin-kit.md"
+    )
+
+    def test_the_surface_map_is_readable_and_non_empty(self) -> None:
+        # A guard whose input set silently became empty would pass forever.
+        documented = _documented_kit_api_names(self.REFERENCE)
+
+        self.assertGreater(len(documented), 8, "Surface Map parsed as nearly empty")
+        self.assertIn("tool", documented)
+
+    def test_every_documented_name_is_exported_and_importable(self) -> None:
+        documented = _documented_kit_api_names(self.REFERENCE) - HOST_OWNED_NAMES
+
+        missing_from_all = sorted(n for n in documented if n not in hpk.__all__)
+        not_importable = sorted(n for n in documented if not hasattr(hpk, n))
+
+        self.assertEqual([], missing_from_all, "documented but absent from __all__")
+        self.assertEqual([], not_importable, "documented but not importable")
+
+    def test_every_exported_name_is_importable(self) -> None:
+        self.assertEqual([], sorted(n for n in hpk.__all__ if not hasattr(hpk, n)))
+
+    def test_the_guard_fails_when_a_documented_name_is_unexported(self) -> None:
+        """Proves the guard has teeth rather than trivially passing."""
+        documented = {"tool", "a_name_the_kit_does_not_export"}
+
+        self.assertEqual(
+            ["a_name_the_kit_does_not_export"],
+            sorted(n for n in documented if n not in hpk.__all__),
+        )
 
 
 class ImportHygieneTests(unittest.TestCase):

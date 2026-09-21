@@ -110,6 +110,34 @@ build:
 check-dist:
     {{ uv }} run twine check dist/*
 
+# Prove every public name imports from an installed wheel, not just the source tree.
+#
+# `twine check` validates metadata and never opens the archive, so it cannot see
+# a module missing from the build. Only installing and importing can.
+check-install: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    wheel="$(ls dist/*.whl | head -n1)"
+    test -n "$wheel" || { echo "no wheel in dist/" >&2; exit 1; }
+    workdir="$(mktemp -d)"
+    trap 'rm -rf "$workdir"' EXIT
+    # --no-project keeps the source tree off sys.path, so a name that only
+    # resolves in-tree fails here instead of passing by accident.
+    repo="$PWD"
+    cat > "$workdir/probe.py" <<'PROBE'
+    import hermes_plugin_kit as hpk
+    missing = sorted(n for n in hpk.__all__ if not hasattr(hpk, n))
+    if missing:
+        raise SystemExit("not importable from the installed wheel: " + ", ".join(missing))
+    import hermes_plugin_kit.testing as t
+    t.RecordingPluginContext(name="install-probe")
+    print("installed wheel exports", len(hpk.__all__), "names; harness constructs")
+    PROBE
+    cd "$workdir"
+    {{ uv }} venv --quiet .venv
+    VIRTUAL_ENV="$workdir/.venv" {{ uv }} pip install --quiet "$repo/$wheel"
+    VIRTUAL_ENV="$workdir/.venv" {{ uv }} run --no-project python probe.py
+
 # Remove Python caches and build artifacts.
 clean:
     find . -type d -name __pycache__ -prune -exec rm -rf {} +
