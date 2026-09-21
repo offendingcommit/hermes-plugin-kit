@@ -1,9 +1,7 @@
 ---
 name: hermes-plugins
 description: Build, modify, migrate, review, and debug Hermes Agent plugin repositories. Use for plugin.yaml manifests, PluginContext or register(ctx), hermes-plugin-kit adoption, tools, commands, middleware, hooks, bundled skills, guarded host calls, media delivery, registration tests, and runtime toolset exposure. Do not use for Hermes core tools or specialized provider plugins unless the request explicitly targets those upstream surfaces.
-version: 0.2.0
 license: MIT
-category: Development Workflow
 metadata:
   audience: developers
   keywords: hermes-agent, plugins, hermes-plugin-kit, PluginContext
@@ -96,4 +94,21 @@ rg -n "register_tool|register_hook|register_command|register_skill|provides_tool
 
 ## Shipping
 
-If the user asks to ship, commit after validation. If the plugin is deployed through infra/GitOps, do not assume the repo change is live; verify the relevant deployment path, branch, tag, or rendered Hermes config when the user asks about runtime truth.
+If the user asks to ship, commit after validation.
+
+When the plugin is deployed through an immutable infra/GitOps snapshot, treat
+the source change and snapshot promotion as one shipping objective with
+separate proof gates:
+
+- Merge the plugin change to the snapshot's declared branch before pinning it.
+  Do not promote an open-PR commit that could become unreachable after a squash
+  merge or branch deletion.
+- From the current infra base, resolve a candidate snapshot, confirm the target
+  plugin advances to the merged commit without regressing other pins, run the
+  repository's full snapshot qualification, and open or update the infra PR.
+- Keep source, promotion, and runtime claims distinct. A merged plugin PR is not
+  deployed; a merged snapshot PR is not live until GitOps reconciles and the
+  effective workload reports the promoted snapshot and plugin revision.
+
+Read the infra repository's local guidance for its policy file, validation
+command, and rollout proof instead of assuming a universal snapshot format.
