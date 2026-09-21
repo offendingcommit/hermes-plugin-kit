@@ -50,15 +50,15 @@
 
 ## 3. Workflow shape held by the release contract (U7)
 
-- [ ] 3.1 Assert the blocking job selects the full contract suite. Verify:
+- [x] 3.1 Assert the blocking job selects the full contract suite. Verify:
       reducing it back to the context-engine module fails the test.
-- [ ] 3.2 Assert the workflow pin equals the harness constant. Verify: editing
+- [x] 3.2 Assert the workflow pin equals the harness constant. Verify: editing
       either one alone fails the test.
-- [ ] 3.3 Assert the drift workflow keeps its schedule trigger, its
+- [x] 3.3 Assert the drift workflow keeps its schedule trigger, its
       report-on-failure condition, and its baseline file. Verify: removing any
       of the three fails the test.
-- [ ] 3.4 Assert the built wheel contains the harness module. Verify: dropping
+- [x] 3.4 Assert the built wheel contains the harness module. Verify: dropping
       it from the packaging manifest fails this test where `twine check` passes.
-- [ ] 3.5 Confirm the existing SHA-pinning, just-only, and
+- [x] 3.5 Confirm the existing SHA-pinning, just-only, and
       `pull_request_target` assertions still hold for the new workflow. Verify:
       the release-contract suite passes with both workflows present.
