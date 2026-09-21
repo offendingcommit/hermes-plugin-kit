@@ -8,11 +8,14 @@ about not having checked, and reachable from an installed package.
 
 from __future__ import annotations
 
+import contextlib
+import types
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import hermes_plugin_kit as hpk
@@ -706,3 +709,174 @@ class EnvironmentAgnosticTests(unittest.TestCase):
                 report = ctx.check_against_host(resolved.plugin_context_class())
                 self.assertFalse(report.checked)
                 self.assertFalse(report.clean)
+
+
+class CompanionFileCapabilityTests(unittest.TestCase):
+    """`register_skill`'s signature is not the only way a host serves files.
+
+    Hermes has served skill companion files through its own skills tool since
+    at least the pinned revision -- `_plugin_skill_linked_files` returns them
+    as `linked_files` alongside the skill body. The kit probed only
+    `register_skill`'s signature and announced the capability missing, which
+    is a false negative that sent at least one plugin off to build a
+    workaround it did not need.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        (root / "SKILL.md").write_text(
+            "---\nname: probe-skill\ndescription: A probe skill.\n---\n\n# probe\n"
+        )
+        (root / "references").mkdir()
+        self.skill = hpk.plugin_skill(
+            name="probe-skill",
+            path=str(root / "SKILL.md"),
+            description="A probe skill.",
+            references_dir=str(root / "references"),
+        )
+
+    def _register(self, ctx):
+        with self.assertLogs("hermes_plugin_kit", level="INFO") as captured:
+            hpk.register_plugin(ctx, [], skills=[self.skill], plugin_name="probe-plugin")
+        return "\n".join(captured.output)
+
+    def test_no_unsupported_claim_when_the_host_serves_companion_files(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(
+            name="probe-plugin", supports_references_dir=False
+        )
+
+        with _host_serving_companion_files():
+            logs = self._register(ctx)
+
+        self.assertNotIn("does not yet accept references_dir", logs)
+        self.assertNotIn("until the host adds support", logs)
+
+    def test_an_undetectable_host_is_not_declared_unsupported(self) -> None:
+        """Not being able to tell is not the same as knowing it is missing."""
+        ctx = hpk_testing.RecordingPluginContext(
+            name="probe-plugin", supports_references_dir=False
+        )
+
+        with _no_host_modules():
+            logs = self._register(ctx)
+
+        self.assertNotIn("until the host adds support", logs)
+        self.assertIn("plugin_reference_tool", logs)
+
+    def test_the_skill_still_registers_either_way(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(
+            name="probe-plugin", supports_references_dir=False
+        )
+
+        self._register(ctx)
+
+        self.assertEqual(["probe-skill"], [s["name"] for s in ctx.skills])
+
+
+@contextlib.contextmanager
+def _no_host_modules():
+    """Hide any ambient Hermes checkout, so the probe genuinely cannot tell."""
+    hidden = {k: None for k in list(sys.modules) if k.split(".")[0] == "tools"}
+    hidden.setdefault("tools", None)
+    with patch.dict(sys.modules, hidden):
+        yield
+
+
+@contextlib.contextmanager
+def _host_serving_companion_files():
+    """Stand in for a Hermes host whose skills tool serves linked files."""
+    module = types.ModuleType("tools.skills_tool")
+    module._plugin_skill_linked_files = lambda root: {"references": ["a.md"]}
+    tools = types.ModuleType("tools")
+    tools.skills_tool = module
+    with patch.dict(sys.modules, {"tools": tools, "tools.skills_tool": module}):
+        yield
+
+
+class DiscardedExampleTests(unittest.TestCase):
+    """An example on an optional key never reached the agent.
+
+    `_split_params` collects it, then `_augment_description` iterates only
+    `required` and the validation error path is required-only too. A plugin
+    with a good example on a genuinely optional field lost it silently -- one
+    fleet plugin had a usable example no agent ever saw, while its handler
+    refused calls that omitted the field.
+    """
+
+    def _schema(self, **params):
+        return hpk.build_schema("probe_example", "Do a thing.", params)
+
+    def test_an_example_on_an_optional_key_reaches_the_description(self) -> None:
+        schema = self._schema(
+            needed=hpk.str_arg("req", required=True, example="abc"),
+            optional=hpk.str_arg("opt", required=False, example="xyz"),
+        )
+
+        self.assertIn("xyz", schema["description"])
+
+    def test_required_examples_still_render_as_required(self) -> None:
+        schema = self._schema(
+            needed=hpk.str_arg("req", required=True, example="abc"),
+        )
+
+        self.assertIn("Required:", schema["description"])
+        self.assertIn("abc", schema["description"])
+
+    def test_an_optional_example_is_not_labelled_required(self) -> None:
+        schema = self._schema(
+            optional=hpk.str_arg("opt", required=False, example="xyz"),
+        )
+
+        description = schema["description"]
+        self.assertIn("xyz", description)
+        self.assertNotIn("Required:", description)
+
+    def test_a_description_without_examples_is_unchanged(self) -> None:
+        schema = self._schema(plain=hpk.str_arg("plain"))
+
+        self.assertEqual("Do a thing.", schema["description"])
+
+
+class ReferenceToolDescriptionTests(unittest.TestCase):
+    """A tool that names no files gives an agent no reason to call it.
+
+    Two fleet reference readers were registered on three profiles and called
+    zero times in eight days. `references_dir` is known at build time, so the
+    filenames cost nothing to include.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        (root / "SKILL.md").write_text(
+            "---\nname: probe-skill\ndescription: A probe skill.\n---\n\n# probe\n"
+        )
+        refs = root / "references"
+        refs.mkdir()
+        (refs / "schema.md").write_text("schema")
+        (refs / "nested").mkdir()
+        (refs / "nested" / "rules.md").write_text("rules")
+        self.skill = hpk.plugin_skill(
+            name="probe-skill", path=str(root / "SKILL.md"),
+            description="A probe skill.", references_dir=str(refs),
+        )
+
+    def test_the_default_description_names_the_available_files(self) -> None:
+        reader = hpk.plugin_reference_tool(self.skill, toolset="probe")
+        description = getattr(reader, "_hpk_tool_spec")["schema"]["description"]
+
+        self.assertIn("schema.md", description)
+        self.assertIn("nested/rules.md", description)
+
+    def test_an_explicit_description_is_left_alone(self) -> None:
+        reader = hpk.plugin_reference_tool(
+            self.skill, toolset="probe", description="My own wording."
+        )
+
+        self.assertEqual(
+            "My own wording.",
+            getattr(reader, "_hpk_tool_spec")["schema"]["description"],
+        )
