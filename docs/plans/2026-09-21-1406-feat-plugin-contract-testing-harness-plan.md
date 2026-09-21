@@ -47,6 +47,7 @@ The gap is not hypothetical. Hermes commit `866332bf` (#99220) added `gateway/re
 - R1. `hermes_plugin_kit.testing` is importable from an installed wheel, with no new runtime dependency and no test-framework import at module import time.
 - R2. The fake records the registration calls a plugin makes, and those recorded calls are replayed against the real Hermes `PluginContext` signatures wherever a Hermes checkout is importable, so a host adding or renaming a required parameter fails rather than passing.
 - R3. The fake is usable with no Hermes checkout present, and a run that could not perform the replay says so rather than presenting itself as drift-checked. When no checkout is available, the harness names the exact revision a consumer must provision to enable the replay.
+
 - R4. A drift failure names the registrar and the parameter that drifted, rather than only raising.
 - R5. Registration assertions cover the receipt's stable log field order, duplicate detection, deterministic ordering, and the schema-under-`function.parameters` convention, so a consumer asserts them without copying literals.
 - R6. The harness ships the deployed Hermes revision as a machine-readable constant, and the CI workflow's pin literal is test-enforced to agree with it.
@@ -69,6 +70,7 @@ The gap is not hypothetical. Hermes commit `866332bf` (#99220) added `gateway/re
 - R14. The plan changes no behavior in `deliver_media` or `invoke_host_tool`.
 - R15. Each OpenSpec change validates under `openspec validate` and is reviewable on its own.
 - R16. No consumer repository's hand-rolled fake context is converted; the consumer lane ends at the kit shipping the harness and a documented recipe.
+- R17. The harness ships a Python-invocable step that validates an existing Hermes checkout or obtains one at the pin, so the replay is reachable on a consumer's machine and not only inside this repository.
 
 ### Success Criteria
 
@@ -213,7 +215,7 @@ OpenSpec has no cross-change dependency mechanism — there is no `depends_on`, 
 - Goal: a consumer asserts the kit's registration contracts without copying literals out of the kit's own tests.
 - Requirements: R4, R5; mechanism per KTD1, KTD3, KTD7
 - Dependencies: U2
-- Files: `hermes_plugin_kit/testing.py`, `tests/test_testing_harness.py`
+- Files: `hermes_plugin_kit/testing.py`, `tests/test_testing_harness.py`, `tests/test_kit.py`
 - Approach:
   1. A receipt assertion pinned to the **log** field order per KTD3, tolerant of which surfaces are populated and rendering empties the way the kit does.
   2. A duplicate-detection assertion covering the distinct registrar messages, including that the same name on a slash command and a CLI command is permitted.
@@ -227,7 +229,7 @@ OpenSpec has no cross-change dependency mechanism — there is no `depends_on`, 
   - Registration submitted out of alphabetical order still yields sorted receipt output.
   - A schema with flattened top-level arguments is rejected; a conforming one passes.
   - Conformance report against a host with an added required parameter names that parameter; against an unchanged host it reports clean.
-- Verification: the kit's own `tests/test_kit.py` registration assertions can be expressed through these helpers without loss of coverage.
+- Verification: the kit's own registration assertions are expressed through these helpers with no loss of coverage, and the migration removes more lines than it adds.
 
 ### U4. Public-surface reachability guard
 
@@ -239,18 +241,18 @@ OpenSpec has no cross-change dependency mechanism — there is no `depends_on`, 
   0. Give the installed-artifact check somewhere to run: a `justfile` recipe that builds, installs into a throwaway environment, and imports through the public path, invoked by a CI job. The Verification Contract names this gate, and without a recipe it either goes unrun or collapses into a unit test executing in the source tree — which is the one place the failure cannot appear.
   1. Add the harness names to `__all__`.
   2. Add `plugin_reference_tool`, which is documented in `README.md` and `skills/hermes-plugins/references/plugin-kit.md` and tested in `tests/test_kit.py`, but is absent from `__all__` today — the drift this unit prevents has already happened once on the newest agent-facing feature.
-  3. Add a guard asserting every documented public name is present in `__all__` and importable from the package root.
-  4. Add an installed-artifact check: build, install into a clean environment, and import the harness through its public path.
+  3. Take the guard's input set from the `Kit API` column of the Surface Map table in `skills/hermes-plugins/references/plugin-kit.md` — the one place the kit enumerates its own public names. Scraping the README instead would sweep up host-side names like `ctx.register_tool` and fail falsely, and the README has no API-surface section to key off. Assert every name in that column is in `__all__` and importable from the package root.
+  4. Have the recipe from step 0 import every `__all__` name from the installed wheel, and run it in the existing packaging job after the metadata check. A module present in an archive is not the same as a module importable after installation, which is what this gate claims to prove.
 - Test scenarios:
   - Every name in `__all__` is importable from the package root.
-  - A name documented in the README's API surface but missing from `__all__` fails the guard — verified by temporarily removing one.
+  - A name listed in the Surface Map's `Kit API` column but missing from `__all__` fails the guard — verified by temporarily removing one.
   - The built wheel contains `hermes_plugin_kit/testing.py`; importing it from a clean install succeeds.
 - Verification: `plugin_reference_tool` and the harness names appear in `__all__`, and the wheel check fails if the module is dropped from the packaging manifest.
 
 ### U5. Pin-aware local contract lane with one discovery policy
 
 - Goal: a local contract run targets the deployed pin and states which Hermes revision it exercised, or refuses.
-- Requirements: R9, R10, R11; mechanism per KTD8
+- Requirements: R9, R10, R11, R17; mechanism per KTD7, KTD8
 - Dependencies: U2
 - Files: `justfile`, `tests/test_hermes_contract.py`, `tests/test_context_engine_contract.py`, `tests/test_testing_harness.py`
 - Approach:
@@ -260,6 +262,8 @@ OpenSpec has no cross-change dependency mechanism — there is no `depends_on`, 
   4. Emit a receipt naming the Hermes revision exercised.
   5. Resolve the local/CI asymmetry: a bare `just test` must not quietly run the contract suite against whatever branch a developer's `~/hermes-agent` happens to sit on, nor report green when it skipped everything.
   6. Per KTD9, assert the executed-test count rather than reading the exit status alone, and add a guard test outside each contract module's `skipUnless` so a configured-but-broken lane fails instead of vanishing. Capture the exit status directly rather than through a pipe, which would report the filter's status instead.
+  7. Give the guard an explicit intent signal — an environment variable the contract recipes set — and have it fail only when that signal is present. Without one the guard cannot distinguish an intended contract run from an ordinary `just test`, so it either reddens the blocking job on every push (that job checks out no Hermes revision and `just test` discovers both contract modules) or never fires at all, leaving R9 unenforced.
+  8. Give the pin recipe and the upstream recipe separate checkout directories. They resolve to the same directory today, and `prepare-hermes-agent` swallows the pull error a detached checkout produces, so an upstream run after a pinned one would silently re-exercise the pin while reporting upstream.
   7. Make `just test-context-engine-contract` require `HERMES_AGENT_PATH` explicitly; it currently sets no variable and has no checkout dependency, so a missing variable produces a silent all-skip.
 - Execution note: reproduce today's misleading-green locally first — a checkout on an unrelated branch, and no checkout at all — so the fix is measured against the actual failure.
 - Test scenarios:
@@ -271,6 +275,8 @@ OpenSpec has no cross-change dependency mechanism — there is no `depends_on`, 
   - A run in which every contract test skips is reported as a failure, not a pass — the case Python 3.11 exits 0 on.
   - A run that collects zero tests is reported as a failure — likewise exit 0 on 3.11.
   - `HERMES_AGENT_PATH` unset for the context-engine recipe: the recipe refuses rather than skipping.
+  - A bare `just test` with no Hermes checkout and no intent signal stays green, while a contract recipe that cannot resolve a host fails.
+  - Running the upstream recipe after the pin recipe exercises upstream, not the pinned revision left behind by the previous run.
 - Verification: a run's receipt names the revision tested and the executed-test count; the pinned recipe reproduces the green result at `f80f453` and the upstream recipe reproduces the media failure at current main; deliberately emptying the lane produces a failure rather than a green run.
 
 ### U6. Blocking gate runs the full suite; drift lane moves to its own schedule
@@ -280,7 +286,7 @@ OpenSpec has no cross-change dependency mechanism — there is no `depends_on`, 
 - Dependencies: U5
 - Files: `.github/workflows/test.yml`, `.github/workflows/hermes-drift.yml`, `tests/fixtures/known-hermes-drift.txt`
 - Approach:
-  1. Point the blocking pinned job at the full contract suite instead of the context-engine module alone. The full suite is already green at that pin, so this adds coverage without adding risk today.
+  1. Point the blocking pinned job at the full contract suite instead of the context-engine module alone. The full suite is already green at that pin — verified by running it there, so widening the job adds coverage rather than risk on the day it lands.
   2. Collapse the two pin literals to one and make it test-enforced against U2's constant per KTD4, rather than leaving two copies that agree with nothing.
   3. Move the upstream-drift job out of `test.yml` into a scheduled workflow per KTD10, dropping `continue-on-error` and leaving it outside required checks.
   4. Have it write the upstream revision and the failing test names to the run's job summary, on a step that runs even after the contract step fails. A reporting step without that condition is skipped by the failure it exists to report, so it would fire only when there is no drift.
@@ -293,7 +299,7 @@ OpenSpec has no cross-change dependency mechanism — there is no `depends_on`, 
 ### U7. Release-contract assertions for the new workflow shape
 
 - Goal: the workflow guarantees this plan introduces cannot silently regress.
-- Requirements: R7, R8; mechanism per KTD5
+- Requirements: R1, R7, R8; mechanism per KTD5
 - Dependencies: U6
 - Files: `tests/test_release_contract.py`
 - Approach: extend the existing workflow-parsing tests — do not add a parallel mechanism. Assert that the blocking contract job selects the full suite, that the workflow's pin equals the harness constant, that the drift workflow carries a schedule trigger and stays out of required checks, and that the built wheel actually contains the harness module. That last assertion matters because the existing packaging gate runs `twine check`, which validates metadata and never inspects archive contents.
@@ -317,7 +323,7 @@ OpenSpec has no cross-change dependency mechanism — there is no `depends_on`, 
   1. Rewrite the Validation section's contract-test instruction to name the harness by **import path** and the pin by constant. It cannot route via kit-repo paths: the skill is consumed as a symlink from a kit checkout, and `tests/` never reaches a consumer install.
   2. Add the harness row to the API routing table in `plugin-kit.md`.
   3. Give the lane a Python-invocable form in the documentation, since consumer repositories predominantly use `make`; `just test-contract` is unusable there.
-  4. Document how a consumer provisions a Hermes checkout at the pin and points the harness at it. Without this the replay never engages anywhere outside this repository: provisioning today lives only in the kit's own `prepare-hermes-agent` recipe, which no consumer installs, so every consumer would get the record-only path and the drift check the harness exists for would never run for them.
+  4. Document the provisioning step from R17 as part of the lane, so an author reaches it without reading this plan. Documentation alone is not enough — without the shipped step, provisioning lives only in the kit's `prepare-hermes-agent` recipe, which no consumer installs, and every consumer gets the record-only path while the drift check the harness exists for never runs for them.
   5. Extend `tests/test_skills.py` to validate relative links in `references/*.md`. It currently checks links in `SKILL.md` bodies only, so reference-file links rot unnoticed — the existing `../../../` links resolve inside a kit checkout but nothing tests them either way.
   6. State the minimum kit revision that provides the harness everywhere the skill names an import path. The skill is read from a moving symlinked checkout while consumers pin the kit immutably, so without it an author on an older pin follows the instruction and gets an import error from a module their kit predates.
   7. `AGENTS.md` already binds `plugin-kit.md` to public-API changes; cite that rule rather than inventing a new gate.
@@ -389,7 +395,7 @@ Per unit:
 |---|---|
 | U1 | The version floor is enforced by a recipe, not a local upgrade; three changes exist, validate, and resolve under `--diff`; `skip_specs` set only on the two tooling changes |
 | U2 | Replay fails against added, renamed, and removed registrar parameters, naming the registrar and parameter in each case; module imports without Hermes or a test framework |
-| U3 | Receipt assertion pins log order; kit's own registration coverage expressible through the helpers |
+| U3 | Receipt assertion pins log order; the kit's own fake is migrated onto the harness with no loss of coverage |
 | U4 | `plugin_reference_tool` and harness names in `__all__`; the build-install-import recipe runs in CI and succeeds |
 | U5 | Run names the revision and executed-test count or refuses; pin recipe green at `f80f453`, upstream recipe red on media; an emptied lane fails |
 | U6 | Blocking job runs the full suite at the pin; drift workflow runs on its own schedule, outside required checks, and surfaces the revision and failing tests on the run summary |
