@@ -35,10 +35,36 @@ from typing import Any, Callable, Iterable, Sequence
 
 __all__ = [
     "DEPLOYED_HERMES_REVISION",
+    "RECEIPT_FIELD_ORDER",
+    "CheckResult",
     "Drift",
     "DriftReport",
     "RecordingPluginContext",
+    "check_registration",
+    "receipt_fields",
 ]
+
+#: Receipt fields in the order ``log_registration_summary`` emits them.
+#:
+#: This is deliberately not ``RegistrationSummary``'s dataclass field order --
+#: the two genuinely differ, and the logged string is the contract AGENTS.md
+#: pins. Asserting the dataclass order instead would pass while the external
+#: contract drifted.
+RECEIPT_FIELD_ORDER: tuple[str, ...] = (
+    "commands",
+    "cli_commands",
+    "tools",
+    "middlewares",
+    "hooks",
+    "skills",
+    "skipped_optional_skills",
+    "memory_providers",
+    "image_gen_providers",
+    "video_gen_providers",
+    "capabilities",
+    "context_engine",
+    "context_engine_registration",
+)
 
 #: The hermes-agent revision this kit's contract lanes are pinned to.
 #:
@@ -397,3 +423,111 @@ class RecordingPluginContext:
                 drifts.append(Drift(registrar, detail))
 
         return DriftReport(checked=True, drifts=tuple(drifts))
+
+
+@dataclass(frozen=True)
+class CheckResult:
+    """A framework-neutral verdict: the consumer decides how to assert it.
+
+    The kit is stdlib ``unittest``, but consumers may not be, so these helpers
+    return a result rather than raising -- ``assert result.ok, result`` works
+    under any runner, and ``problems`` says what to fix.
+    """
+
+    problems: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return not self.problems
+
+    def __bool__(self) -> bool:  # pragma: no cover - trivial
+        return self.ok
+
+    def __str__(self) -> str:
+        return "ok" if self.ok else "; ".join(self.problems)
+
+
+def receipt_fields(message: str) -> dict[str, tuple[str, ...]]:
+    """Parse one registration receipt into its fields, in emitted order.
+
+    Lets a consumer assert what was registered without copying the kit's format
+    string into their own test. ``<none>`` becomes an empty tuple, so an absent
+    surface and an empty one read the same way.
+    """
+    fields: dict[str, tuple[str, ...]] = {}
+    for chunk in message.split("; "):
+        key, sep, value = chunk.partition("=")
+        key = key.strip()
+        if not sep or key not in RECEIPT_FIELD_ORDER:
+            continue
+        value = value.strip()
+        fields[key] = () if value == "<none>" else tuple(value.split(","))
+    return {k: fields[k] for k in RECEIPT_FIELD_ORDER if k in fields}
+
+
+def _schema_problems(name: str, schema: Any) -> list[str]:
+    """A tool's arguments belong under ``parameters``, never flattened beside it.
+
+    The kit hands ``register_tool`` the inner function schema --
+    ``{name, description, parameters}`` -- and Hermes' registry wraps it so the
+    arguments land at ``function.parameters`` in the tool it exposes. So a
+    top-level ``properties`` here is the defect: it flattens the arguments and
+    they never reach ``function.parameters`` after conversion.
+    """
+    if not isinstance(schema, dict) or not schema:
+        return []
+    problems: list[str] = []
+    if "properties" in schema:
+        problems.append(
+            f"tool {name!r} declares arguments beside `parameters` instead of inside "
+            f"it, so they would not reach function.parameters once Hermes converts "
+            f"the schema"
+        )
+    parameters = schema.get("parameters")
+    if parameters is not None and not isinstance(parameters, dict):
+        problems.append(f"tool {name!r} has a non-object `parameters`")
+    elif isinstance(parameters, dict) and parameters.get("type") not in (None, "object"):
+        problems.append(
+            f"tool {name!r} has parameters.type {parameters.get('type')!r}; "
+            f"Hermes expects 'object'"
+        )
+    return problems
+
+
+def check_registration(ctx: RecordingPluginContext) -> CheckResult:
+    """Check what a plugin registered against the kit's standing conventions.
+
+    Covers deterministic ordering, duplicate names, and the
+    arguments-under-``function.parameters`` schema shape -- the contracts a
+    consumer would otherwise copy out of the kit's own test suite.
+
+    A name used for both a slash command and a CLI command is allowed; the kit
+    permits that pairing deliberately, so the duplicate check is per surface.
+    """
+    problems: list[str] = []
+
+    named_surfaces = {
+        "tools": [t.get("name") for t in ctx.tools],
+        "commands": [c.get("name") for c in ctx.commands],
+        "cli_commands": [c.get("name") for c in ctx.cli_commands],
+        "skills": [s.get("name") for s in ctx.skills],
+        "hooks": [h[0] for h in ctx.hooks],
+        "middlewares": [str(m[0]) for m in ctx.middlewares],
+    }
+
+    for surface, names in named_surfaces.items():
+        present = [n for n in names if n is not None]
+        duplicates = sorted({n for n in present if present.count(n) > 1})
+        if duplicates:
+            problems.append(f"duplicate {surface} name(s): {', '.join(duplicates)}")
+        if present != sorted(present):
+            problems.append(
+                f"{surface} were recorded out of order ({', '.join(present)}); "
+                f"register_plugin sorts every registrar, so this indicates a "
+                f"registration path that bypassed it"
+            )
+
+    for tool in ctx.tools:
+        problems.extend(_schema_problems(tool.get("name"), tool.get("schema")))
+
+    return CheckResult(tuple(problems))
