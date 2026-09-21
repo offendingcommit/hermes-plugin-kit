@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import hermes_plugin_kit as hpk
+from hermes_plugin_kit.testing import RecordingPluginContext
 
 
 @contextmanager
@@ -34,63 +35,16 @@ def fake_context_engine_host():
         yield ContextEngine
 
 
-class FakeCtx:
-    def __init__(self) -> None:
-        self.tools: list[dict] = []
-
-    def register_tool(self, **kwargs) -> None:
-        self.tools.append(kwargs)
-
-
-class FakePluginCtx(FakeCtx):
-    def __init__(self) -> None:
-        super().__init__()
-        self.commands: list[dict] = []
-        self.cli_commands: list[dict] = []
-        self.middlewares: list[tuple[str, object]] = []
-        self.hooks: list[tuple[str, object]] = []
-        self.skills: list[dict] = []
-        self.image_gen_providers: list[object] = []
-        self.video_gen_providers: list[object] = []
-        self.memory_providers: list[object] = []
-        self.context_engines: list[object] = []
-        self.context_engine_result = True
-        self.subagent_lifecycle = types.SimpleNamespace(
-            launch=lambda request: request,
-            status=lambda handle: handle,
-            wait=lambda handle, **kwargs: handle,
-            cancel=lambda handle, **kwargs: handle,
-            result=lambda handle: handle,
-            reconnect=lambda handle: handle,
-        )
-
-    def register_command(self, **kwargs) -> None:
-        self.commands.append(kwargs)
-
-    def register_cli_command(self, **kwargs) -> None:
-        self.cli_commands.append(kwargs)
-
-    def register_middleware(self, kind, callback) -> None:
-        self.middlewares.append((kind, callback))
-
-    def register_hook(self, hook_name, callback) -> None:
-        self.hooks.append((hook_name, callback))
-
-    def register_skill(self, **kwargs) -> None:
-        self.skills.append(kwargs)
-
-    def register_image_gen_provider(self, provider) -> None:
-        self.image_gen_providers.append(provider)
-
-    def register_video_gen_provider(self, provider) -> None:
-        self.video_gen_providers.append(provider)
-
-    def register_memory_provider(self, provider) -> None:
-        self.memory_providers.append(provider)
-
-    def register_context_engine(self, engine):
-        self.context_engines.append(engine)
-        return self.context_engine_result
+# The kit's own tests use the harness it ships, so the consumer-facing surface
+# is exercised by a real caller rather than only by its own unit tests. These
+# aliases keep the historical names at the ~36 call sites below.
+#
+# Note the registrars are instance attributes on the harness, which is what lets
+# a missing one genuinely disappear. A subclass overriding `register_skill` as a
+# class attribute would therefore be shadowed -- host shapes are selected with
+# constructor modes instead (see `references_dir_probe_lies` and friends).
+FakeCtx = RecordingPluginContext
+FakePluginCtx = RecordingPluginContext
 
 
 class SessionDBHelperTests(unittest.TestCase):
@@ -2020,12 +1974,6 @@ class RegisterPluginTests(unittest.TestCase):
     def test_register_plugin_falls_back_gracefully_when_host_lacks_references_dir_support(
         self,
     ) -> None:
-        class StrictHostCtx(FakePluginCtx):
-            """Mirrors today's real hermes-agent PluginContext.register_skill signature."""
-
-            def register_skill(self, name, path, description="") -> None:
-                self.skills.append({"name": name, "path": path, "description": description})
-
         with tempfile.TemporaryDirectory() as tmp:
             skill_path = Path(tmp) / "SKILL.md"
             skill_path.write_text(
@@ -2035,7 +1983,7 @@ class RegisterPluginTests(unittest.TestCase):
             references_dir.mkdir()
             skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
 
-            ctx = StrictHostCtx()
+            ctx = RecordingPluginContext(supports_references_dir=False)
             with self.assertLogs(level="WARNING") as logs:
                 hpk.register_plugin(ctx, self._module(), skills=(skill,))
 
@@ -2107,19 +2055,6 @@ class RegisterPluginTests(unittest.TestCase):
     def test_register_plugin_passes_references_dir_to_a_host_with_an_explicit_parameter(
         self,
     ) -> None:
-        class ExplicitParamHostCtx(FakePluginCtx):
-            """A host whose register_skill names references_dir directly -- no **kwargs."""
-
-            def register_skill(self, name, path, description="", references_dir=None) -> None:
-                self.skills.append(
-                    {
-                        "name": name,
-                        "path": path,
-                        "description": description,
-                        "references_dir": references_dir,
-                    }
-                )
-
         with tempfile.TemporaryDirectory() as tmp:
             skill_path = Path(tmp) / "SKILL.md"
             skill_path.write_text(
@@ -2129,7 +2064,7 @@ class RegisterPluginTests(unittest.TestCase):
             references_dir.mkdir()
             skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
 
-            ctx = ExplicitParamHostCtx()
+            ctx = RecordingPluginContext(supports_references_dir=True)
             hpk.register_plugin(ctx, self._module(), skills=(skill,))
 
         self.assertEqual(ctx.skills[0]["references_dir"], references_dir)
@@ -2141,14 +2076,6 @@ class RegisterPluginTests(unittest.TestCase):
         # Mock(spec=...) or a decorator applied without functools.wraps produces this exact
         # shape in practice) reports acceptance via inspect.signature, but the real
         # implementation still raises TypeError for the unexpected keyword at call time.
-        class FooledProbeHostCtx(FakePluginCtx):
-            def register_skill(self, **kwargs) -> None:
-                if "references_dir" in kwargs:
-                    raise TypeError(
-                        "register_skill() got an unexpected keyword argument 'references_dir'"
-                    )
-                self.skills.append(kwargs)
-
         with tempfile.TemporaryDirectory() as tmp:
             skill_path = Path(tmp) / "SKILL.md"
             skill_path.write_text(
@@ -2158,7 +2085,7 @@ class RegisterPluginTests(unittest.TestCase):
             references_dir.mkdir()
             skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
 
-            ctx = FooledProbeHostCtx()
+            ctx = RecordingPluginContext(references_dir_probe_lies=True)
             with self.assertLogs(level="WARNING") as logs:
                 summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
 
@@ -2168,10 +2095,6 @@ class RegisterPluginTests(unittest.TestCase):
         self.assertIn("rejected it at call time", "\n".join(logs.output))
 
     def test_register_plugin_reraises_unrelated_type_errors_from_register_skill(self) -> None:
-        class BrokenHostCtx(FakePluginCtx):
-            def register_skill(self, **kwargs) -> None:
-                raise TypeError("register_skill() missing 1 required positional argument")
-
         with tempfile.TemporaryDirectory() as tmp:
             skill_path = Path(tmp) / "SKILL.md"
             skill_path.write_text(
@@ -2182,7 +2105,15 @@ class RegisterPluginTests(unittest.TestCase):
             skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
 
             with self.assertRaises(TypeError):
-                hpk.register_plugin(BrokenHostCtx(), self._module(), skills=(skill,))
+                hpk.register_plugin(
+                    RecordingPluginContext(
+                        register_skill_error=TypeError(
+                            "register_skill() missing 1 required positional argument"
+                        )
+                    ),
+                    self._module(),
+                    skills=(skill,),
+                )
 
 
 class PluginReferenceToolTests(unittest.TestCase):

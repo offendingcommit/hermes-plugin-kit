@@ -47,13 +47,13 @@
 
 ## 4. Migrate the kit's own fake onto the harness (U3)
 
-- [ ] 4.1 Replace `FakeCtx` and `FakePluginCtx` in `tests/test_kit.py` with the
+- [x] 4.1 Replace `FakeCtx` and `FakePluginCtx` in `tests/test_kit.py` with the
       harness. Verify: the suite passes unchanged, with no loss of coverage.
-- [ ] 4.2 Replace the four bespoke host-shape classes — the strict positional
+- [x] 4.2 Replace the four bespoke host-shape classes — the strict positional
       host, the explicit-`references_dir` host, the fooled-probe host, and the
       broken host — with harness modes. Verify: the tests that own those
       branches still fail when their branch regresses.
-- [ ] 4.3 Record the line delta from the migration. Verify: the migration
+- [x] 4.3 Record the line delta from the migration. Verify: the migration
       removes more lines than it adds, which is the success criterion's only
       in-repo evidence.
 
