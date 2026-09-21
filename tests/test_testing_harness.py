@@ -487,6 +487,116 @@ class PublicSurfaceGuardTests(unittest.TestCase):
         )
 
 
+def _make_checkout(root: Path, revision_marker: str) -> str:
+    """A real git repo with one commit, so HEAD comparison is genuine."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "hermes_cli").mkdir(exist_ok=True)
+    (root / "hermes_cli" / "plugins.py").write_text(f"# {revision_marker}\n")
+    run = lambda *a: subprocess.run(  # noqa: E731
+        ["git", "-C", str(root), *a], check=True, capture_output=True
+    )
+    run("init", "-q")
+    run("config", "user.email", "probe@example.com")
+    run("config", "user.name", "Probe")
+    run("add", "-A")
+    run("commit", "-q", "-m", revision_marker)
+    return subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+class CheckoutResolverTests(unittest.TestCase):
+    """The replay is unreachable for a consumer unless this ships."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_offline_with_no_checkout_returns_an_unchecked_result(self) -> None:
+        """The case a consumer in a sandboxed CI run actually hits."""
+        resolved = hpk_testing.resolve_hermes_checkout(
+            cache_dir=self.root / "cache",
+            env={},
+            fetcher=lambda *a, **k: (_ for _ in ()).throw(
+                OSError("network is unreachable")
+            ),
+        )
+
+        self.assertFalse(resolved.available)
+        self.assertIsNone(resolved.path)
+        self.assertIn(hpk_testing.DEPLOYED_HERMES_REVISION, resolved.detail)
+        self.assertIn("network is unreachable", resolved.detail)
+
+    def test_offline_result_feeds_the_unchecked_report(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        _register_a_tool(ctx)
+        resolved = hpk_testing.resolve_hermes_checkout(
+            cache_dir=self.root / "cache", env={},
+            fetcher=lambda *a, **k: (_ for _ in ()).throw(OSError("offline")),
+        )
+
+        report = ctx.check_against_host(resolved.plugin_context_class())
+
+        self.assertFalse(report.checked)
+        self.assertFalse(report.clean)
+
+    def test_explicit_path_wins_and_no_fetch_is_attempted(self) -> None:
+        head = _make_checkout(self.root / "supplied", "supplied-checkout")
+        fetched = []
+
+        resolved = hpk_testing.resolve_hermes_checkout(
+            cache_dir=self.root / "cache",
+            env={"HERMES_AGENT_PATH": str(self.root / "supplied")},
+            fetcher=lambda *a, **k: fetched.append(a) or None,
+        )
+
+        self.assertTrue(resolved.available, resolved.detail)
+        self.assertEqual(self.root / "supplied", resolved.path)
+        self.assertEqual(head, resolved.revision)
+        self.assertEqual([], fetched, "a supplied checkout must not trigger a fetch")
+
+    def test_explicit_path_that_is_not_a_checkout_is_refused(self) -> None:
+        (self.root / "empty").mkdir()
+
+        resolved = hpk_testing.resolve_hermes_checkout(
+            cache_dir=self.root / "cache",
+            env={"HERMES_AGENT_PATH": str(self.root / "empty")},
+            fetcher=lambda *a, **k: None,
+        )
+
+        self.assertFalse(resolved.available)
+        self.assertIn("empty", resolved.detail)
+
+    def test_cache_at_the_right_revision_is_reused_without_fetching(self) -> None:
+        cache = self.root / "cache"
+        head = _make_checkout(cache, "cached")
+        fetched = []
+
+        resolved = hpk_testing.resolve_hermes_checkout(
+            revision=head, cache_dir=cache, env={},
+            fetcher=lambda *a, **k: fetched.append(a) or None,
+        )
+
+        self.assertTrue(resolved.available, resolved.detail)
+        self.assertEqual(head, resolved.revision)
+        self.assertEqual([], fetched, "a cache at the pin must not refetch")
+
+    def test_cache_at_the_wrong_revision_is_never_used_as_the_pin(self) -> None:
+        cache = self.root / "cache"
+        _make_checkout(cache, "some-other-revision")
+        wanted = "0" * 40
+
+        resolved = hpk_testing.resolve_hermes_checkout(
+            revision=wanted, cache_dir=cache, env={},
+            fetcher=lambda *a, **k: (_ for _ in ()).throw(OSError("offline")),
+        )
+
+        self.assertFalse(resolved.available)
+        self.assertNotIn("some-other-revision", str(resolved.path))
+
+
 class ImportHygieneTests(unittest.TestCase):
     """The module ships in the wheel and must cost nothing until it is used."""
 

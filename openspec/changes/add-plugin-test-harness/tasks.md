@@ -72,14 +72,14 @@
 
 ## 6. Shipped checkout resolver (U9)
 
-- [ ] 6.1 Write the offline case first: no checkout, no network. Verify: it
+- [x] 6.1 Write the offline case first: no checkout, no network. Verify: it
       fails before implementation, then returns an explicit unchecked result
       naming the revision and the reason, within the timeout.
-- [ ] 6.2 Export the resolver, honoring an explicit `HERMES_AGENT_PATH` ahead of
+- [x] 6.2 Export the resolver, honoring an explicit `HERMES_AGENT_PATH` ahead of
       any fetch. Verify: a supplied path is used as-is and no fetch is attempted.
-- [ ] 6.3 Fetch at the pin when nothing resolves, into a reused cache, bounded
+- [x] 6.3 Fetch at the pin when nothing resolves, into a reused cache, bounded
       by a timeout and never silently retried. Verify: the first call fetches a
       checkout whose HEAD is the pin and the replay then runs; the second call
       reuses the cache.
-- [ ] 6.4 Refuse or re-resolve a cache sitting at the wrong revision. Verify: a
+- [x] 6.4 Refuse or re-resolve a cache sitting at the wrong revision. Verify: a
       cache at an unrelated revision is never used as if it were the pin.
