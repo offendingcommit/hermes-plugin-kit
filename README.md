@@ -543,9 +543,10 @@ blueprint, environment-variable, and credential-file metadata shapes. Runtime
 activation and setup behavior remain owned by Hermes Agent.
 
 `plugin_skill` also accepts an optional `references_dir` for a companion
-directory of reference files sibling to `SKILL.md` (Hermes' own convention
-names these `references`, `templates`, `assets`, or `scripts`, but any
-directory name is accepted) — as long as it's actually inside the skill's
+directory of reference files sibling to `SKILL.md` (Hermes serves these from
+four fixed names — `references`, `templates`, `assets`, or `scripts`; the kit
+accepts any name, but only those four are surfaced by the host, see below)
+— as long as it's actually inside the skill's
 own directory tree (any depth of subdirectory is fine; a path outside it,
 including via a symlink, raises `ValueError` immediately, regardless of
 `optional`). Without that check, `references_dir` would accept literally any
@@ -568,26 +569,41 @@ plugin_skill(
 )
 ```
 
-**This is forward-compatible groundwork, not yet an effective capability.**
-`register_plugin` only forwards `references_dir` to `ctx.register_skill` when
-the host's own signature accepts that parameter (checked at registration
-time via `inspect.signature`, so older hosts are never called with an
-argument they don't understand). That check is a best-effort probe, not a
-guarantee — a host reached through a generic `**kwargs` shape (a decorator
-applied without `functools.wraps`, or a test double built with a bare
-`Mock(spec=...)` instead of `create_autospec(...)`) can report acceptance it
-doesn't actually have, so `register_plugin` also retries once without
-`references_dir` if the host rejects it at call time, logging a warning
-either way. As of this writing, no released Hermes Agent host reads or
-serves plugin-skill companion files, so declaring `references_dir` today
-does not make the directory agent-visible. Once a host adds support, plugins
-that already declare `references_dir` start working with no further
-kit-side change.
+**Hermes already serves plugin-skill companion files — but by convention, not
+from this parameter.** When the host serves a plugin skill it scans the
+`SKILL.md` directory for four fixed category directories — `references`,
+`templates`, `assets`, and `scripts` — and returns whatever it finds under
+them as `linked_files` alongside the skill body (any file type, at any depth).
+It derives that location from `SKILL.md` itself, which is why the host's
+`register_skill` has no `references_dir` parameter and does not need one.
 
-**`plugin_reference_tool` makes the directory agent-visible today, without
-waiting on a host.** It builds an ordinary `@tool`-decorated function — no
-`register_skill` involvement at all — that lists or reads files under a
-skill's `references_dir`:
+Two consequences worth being precise about:
+
+- **Name the directory `references`** (or one of the other three) and put it
+  beside `SKILL.md`. The kit accepts any directory name, but a name outside
+  those four is never surfaced by the host — the kit's laxity here buys
+  nothing on the host side.
+- **`references_dir` is inert as a host argument.** `register_plugin` forwards
+  it to `ctx.register_skill` only when the host's signature accepts it
+  (checked via `inspect.signature`, so older hosts are never called with an
+  argument they don't understand), and no host accepts it. That probe is
+  best-effort, not a guarantee — a host reached through a generic `**kwargs`
+  shape (a decorator applied without `functools.wraps`, or a test double built
+  with a bare `Mock(spec=...)` instead of `create_autospec(...)`) can report
+  acceptance it doesn't have, so `register_plugin` retries once without
+  `references_dir` if the host rejects it at call time. When it drops the
+  argument it logs at debug rather than warning, because the files are served
+  anyway; the louder message is reserved for hosts where companion-file
+  support can't be confirmed.
+
+So declaring `references_dir` is still worth doing — it drives the kit's own
+validation and `plugin_reference_tool` below — but it is not what makes the
+directory visible. Placement and naming are.
+
+**`plugin_reference_tool` gives the model an explicit read tool for the same
+directory.** The host's `linked_files` lists companion files when a skill is
+viewed; this builds an ordinary `@tool`-decorated function — no
+`register_skill` involvement at all — that lists or reads them on demand:
 
 ```python
 reader = plugin_reference_tool(skill, toolset="temporal-awareness")

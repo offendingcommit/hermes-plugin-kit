@@ -1409,12 +1409,17 @@ def plugin_skill(
     fires when the field is still non-``None``.)
 
     ``references_dir`` is passed to the host's ``register_skill`` **only when the host's own
-    signature accepts it** -- as of this writing, no released ``hermes-agent`` host surfaces
-    plugin-skill companion files, so declaring ``references_dir`` today does not yet make the
-    directory agent-visible. It is forward-compatible groundwork: once a host adds support,
-    plugins that already declare ``references_dir`` start working with no further kit-side change.
-    Until then, ``register_plugin`` logs a warning naming the skill so the gap stays visible rather
-    than silently doing nothing.
+    signature accepts it**, and no host accepts it -- because none needs to. Hermes serves
+    plugin-skill companion files by convention, scanning the ``SKILL.md`` directory for four
+    fixed category directories (``references``, ``templates``, ``assets``, ``scripts``) and
+    returning what it finds as ``linked_files`` beside the skill body. It derives that location
+    from ``SKILL.md`` itself, so the parameter is inert as a host argument.
+
+    That makes placement and naming the thing that matters: this field drives kit-side validation
+    and :func:`plugin_reference_tool`, but a directory named outside those four is never surfaced
+    by the host no matter what is declared here. ``register_plugin`` logs at debug when it drops
+    the argument against a host whose companion-file support it can confirm, and louder when it
+    cannot.
     """
     if not isinstance(name, str) or not _SKILL_NAME_RE.fullmatch(name):
         raise ValueError("skill name must match [a-zA-Z0-9_-]+ and contain no namespace")
@@ -1466,12 +1471,11 @@ def plugin_reference_tool(
 ) -> Callable:
     """Build a ``@tool``-decorated handler that lists or reads ``skill.references_dir``.
 
-    Companion-file support in ``register_skill`` (see ``references_dir`` on :func:`plugin_skill`)
-    is forward-compatible groundwork only -- no released Hermes Agent host serves those files to
-    the agent yet. This factory sidesteps that gap entirely: it builds an ordinary tool, using the
-    same ``@tool``/``register_plugin`` mechanism every other plugin capability already goes
-    through, so the agent can read the directory's contents today on any host, regardless of
-    ``register_skill`` support.
+    This complements, rather than substitutes for, the host's own companion-file support. Hermes
+    lists these files as ``linked_files`` when the skill is viewed (see ``references_dir`` on
+    :func:`plugin_skill`); this factory gives the model an explicit tool to list and read them on
+    demand, through the same ``@tool``/``register_plugin`` mechanism every other plugin capability
+    goes through, without depending on the skill having been viewed first.
 
     Call with no arguments (or ``file_path=None``) to list every file under ``references_dir``.
     Call with ``file_path`` set to a path relative to ``references_dir`` to read that file's
