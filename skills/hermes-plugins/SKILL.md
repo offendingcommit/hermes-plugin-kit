@@ -70,17 +70,56 @@ For catalog or content plugins, keep public summaries from leaking raw prompts, 
 
 ## Validation
 
-Run the repo-native install/test commands before committing. Common examples:
-
-```bash
-just install
-just test
-just build
-```
+Run the plugin repository's own install/test commands before committing —
+whatever its task runner is. (`just install` / `just test` / `just build` are
+this kit's own recipes, not something a consumer repository has.)
 
 Also run focused registration, manifest-parity, hook or middleware, and local
-import tests for the surface touched. When compatibility matters, run contract
-tests against the real pinned Hermes Agent checkout.
+import tests for the surface touched.
+
+### Checking your plugin against the real host
+
+A fake plugin context cannot tell you the host changed underneath you. A
+permissive one accepts every future signature, and a hand-written one is a
+frozen snapshot of whichever Hermes revision you wrote it against — both keep
+passing when Hermes adds a required parameter.
+
+Use the kit's harness instead. It records what your plugin registers and
+replays those calls against the real `PluginContext` signatures:
+
+```python
+from hermes_plugin_kit.testing import (
+    DEPLOYED_HERMES_REVISION,
+    RecordingPluginContext,
+    resolve_hermes_checkout,
+)
+
+ctx = RecordingPluginContext(name="your-plugin", config={})
+register(ctx)                     # your plugin's own registration entry point
+
+host = resolve_hermes_checkout()  # honors HERMES_AGENT_PATH; fetches at the pin otherwise
+report = ctx.check_against_host(host.plugin_context_class())
+assert report.clean, report       # `checked` is False when no host was available
+```
+
+Requires **hermes-plugin-kit 0.9.0 or newer** — earlier pins have no
+`hermes_plugin_kit.testing` module, and this skill tracks a moving checkout
+while your plugin pins the kit to a commit, so check before you follow this.
+
+This is plain Python. Wire it into `make`, `pytest`, `unittest`, or whatever
+the repository already uses; it does not need this kit's task runner.
+
+**When no checkout is available** — a sandboxed runner, no network, no `git` —
+`resolve_hermes_checkout()` returns an unavailable result naming
+`DEPLOYED_HERMES_REVISION`, and `check_against_host(None)` gives a report with
+`checked == False`. That is the honest outcome, not a failure to route around:
+treat an unchecked report as "not verified", never as "verified clean". Set
+`HERMES_AGENT_PATH` to a local checkout to run the check offline, or
+`HERMES_PLUGIN_KIT_CACHE` to control where a fetched one is stored.
+
+`check_registration(ctx)` additionally reports duplicate names, non-deterministic
+ordering, and tool schemas whose arguments are flattened beside `parameters`
+instead of inside it.
 
 For tool surfaces, prefer a test that asserts every registered tool has:
 matching `plugin.yaml` exposure, matching schema `name`, non-empty schema

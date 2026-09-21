@@ -465,17 +465,35 @@ class PublicSurfaceGuardTests(unittest.TestCase):
         self.assertGreater(len(documented), 8, "Surface Map parsed as nearly empty")
         self.assertIn("tool", documented)
 
+    #: Modules whose `__all__` together form the kit's public surface.
+    #:
+    #: The harness is exported as a submodule rather than by name, so its
+    #: classes live on `hermes_plugin_kit.testing` -- still a public import
+    #: path, so a documented name resolving there is reachable.
+    PUBLIC_MODULES = (hpk, hpk_testing)
+
+    def _exported_names(self) -> set[str]:
+        return {n for module in self.PUBLIC_MODULES for n in module.__all__}
+
+    def _resolves(self, name: str) -> bool:
+        return any(hasattr(module, name) for module in self.PUBLIC_MODULES)
+
     def test_every_documented_name_is_exported_and_importable(self) -> None:
         documented = _documented_kit_api_names(self.REFERENCE) - HOST_OWNED_NAMES
+        exported = self._exported_names()
 
-        missing_from_all = sorted(n for n in documented if n not in hpk.__all__)
-        not_importable = sorted(n for n in documented if not hasattr(hpk, n))
+        missing_from_all = sorted(n for n in documented if n not in exported)
+        not_importable = sorted(n for n in documented if not self._resolves(n))
 
         self.assertEqual([], missing_from_all, "documented but absent from __all__")
         self.assertEqual([], not_importable, "documented but not importable")
 
     def test_every_exported_name_is_importable(self) -> None:
-        self.assertEqual([], sorted(n for n in hpk.__all__ if not hasattr(hpk, n)))
+        for module in self.PUBLIC_MODULES:
+            with self.subTest(module=module.__name__):
+                self.assertEqual(
+                    [], sorted(n for n in module.__all__ if not hasattr(module, n))
+                )
 
     def test_the_guard_fails_when_a_documented_name_is_unexported(self) -> None:
         """Proves the guard has teeth rather than trivially passing."""
@@ -483,7 +501,7 @@ class PublicSurfaceGuardTests(unittest.TestCase):
 
         self.assertEqual(
             ["a_name_the_kit_does_not_export"],
-            sorted(n for n in documented if n not in hpk.__all__),
+            sorted(n for n in documented if n not in self._exported_names()),
         )
 
 
