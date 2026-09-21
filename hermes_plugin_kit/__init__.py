@@ -120,6 +120,9 @@ __all__ = [
     "credential_identity_hash",
     "log_observability_event",
     "new_correlation_id",
+    # Documented in README.md and the Surface Map, and tested, but absent from
+    # this list until now -- the exact drift the reachability guard prevents.
+    "plugin_reference_tool",
     # Consumer-facing test support. The submodule is the public name rather than
     # its individual classes, so test doubles stay out of the runtime namespace
     # (the shape django.test and starlette.testclient take).

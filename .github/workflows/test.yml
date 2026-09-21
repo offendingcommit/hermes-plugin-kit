@@ -39,6 +39,11 @@ jobs:
         run: |
           just build
           just check-dist
+      # `twine check` reads metadata and never opens the archive, so it passes
+      # on a wheel that is missing a module entirely. Installing and importing
+      # is the only thing that catches that.
+      - name: Prove the public surface imports from the installed wheel
+        run: just check-install
 
   # Amber admission gates on the exact deployed Hermes fork contract. Keep the
   # immutable revision aligned with infra's candidate image/source receipt.

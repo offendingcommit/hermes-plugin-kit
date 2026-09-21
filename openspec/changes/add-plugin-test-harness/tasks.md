@@ -59,14 +59,14 @@
 
 ## 5. Public-surface reachability (U4)
 
-- [ ] 5.1 Add a `justfile` recipe that builds, installs into a throwaway
+- [x] 5.1 Add a `justfile` recipe that builds, installs into a throwaway
       environment, and imports every `__all__` name, plus the CI job that runs
       it after the metadata check. Verify: the recipe fails when the module is
       dropped from the packaging manifest, where `twine check` passes.
-- [ ] 5.2 Add `plugin_reference_tool` to `__all__`, closing the existing gap
+- [x] 5.2 Add `plugin_reference_tool` to `__all__`, closing the existing gap
       between what the kit documents and what it exports. Verify: it is
       importable from the package root and present in the export list.
-- [ ] 5.3 Add the guard asserting every name in the Surface Map's `Kit API`
+- [x] 5.3 Add the guard asserting every name in the Surface Map's `Kit API`
       column is exported and importable. Verify: temporarily removing one name
       fails the guard.
 
