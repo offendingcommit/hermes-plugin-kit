@@ -1,0 +1,13 @@
+schema: spec-driven
+created: 2026-09-21
+
+# This changes observable behaviour -- what the kit claims about the host and
+# what it surfaces to an agent -- but there is no capability spec covering the
+# registration-claims surface to modify. openspec/specs/ is empty until the
+# first change archives, and the only spec in flight covers the test harness.
+#
+# Writing a delta here would mean inventing a capability to satisfy the
+# validator, which the shipped template explicitly warns against. The honest
+# marker is skip_specs, and this surface deserves a real spec once the store
+# has one to modify.
+skip_specs: true

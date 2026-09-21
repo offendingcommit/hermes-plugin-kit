@@ -1949,7 +1949,7 @@ class RegisterPluginTests(unittest.TestCase):
             )
 
             ctx = FakePluginCtx()
-            with self.assertLogs(level="WARNING") as logs:
+            with self.assertLogs(level="DEBUG") as logs:
                 summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
 
         self.assertEqual(summary.skills, ("sample",))
@@ -1984,11 +1984,14 @@ class RegisterPluginTests(unittest.TestCase):
             skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
 
             ctx = RecordingPluginContext(supports_references_dir=False)
-            with self.assertLogs(level="WARNING") as logs:
+            with self.assertLogs(level="DEBUG") as logs:
                 hpk.register_plugin(ctx, self._module(), skills=(skill,))
 
         self.assertNotIn("references_dir", ctx.skills[0])
-        self.assertIn("does not yet accept references_dir", "\n".join(logs.output))
+        self.assertIn("does not accept references_dir", "\n".join(logs.output))
+        # The kit no longer claims the files go unserved: Hermes serves them
+        # through its skills tool regardless of this signature.
+        self.assertNotIn("until the host adds support", "\n".join(logs.output))
 
     def test_register_plugin_drops_references_dir_removed_after_declaration_for_optional_skill(
         self,
@@ -2006,7 +2009,7 @@ class RegisterPluginTests(unittest.TestCase):
             references_dir.rmdir()
 
             ctx = FakePluginCtx()
-            with self.assertLogs(level="WARNING") as logs:
+            with self.assertLogs(level="DEBUG") as logs:
                 summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
 
         self.assertEqual(summary.skills, ("sample",))
@@ -2042,7 +2045,7 @@ class RegisterPluginTests(unittest.TestCase):
             ctx = FakePluginCtx()
             with (
                 patch.object(hpk, "inspect") as fake_inspect,
-                self.assertLogs(level="WARNING") as logs,
+                self.assertLogs(level="DEBUG") as logs,
             ):
                 fake_inspect.signature.side_effect = ValueError("no signature found")
                 fake_inspect.Parameter = inspect.Parameter
@@ -2050,7 +2053,10 @@ class RegisterPluginTests(unittest.TestCase):
 
         self.assertEqual(summary.skills, ("sample",))
         self.assertNotIn("references_dir", ctx.skills[0])
-        self.assertIn("does not yet accept references_dir", "\n".join(logs.output))
+        self.assertIn("does not accept references_dir", "\n".join(logs.output))
+        # The kit no longer claims the files go unserved: Hermes serves them
+        # through its skills tool regardless of this signature.
+        self.assertNotIn("until the host adds support", "\n".join(logs.output))
 
     def test_register_plugin_passes_references_dir_to_a_host_with_an_explicit_parameter(
         self,
@@ -2086,7 +2092,7 @@ class RegisterPluginTests(unittest.TestCase):
             skill = hpk.plugin_skill("sample", skill_path, "Sample.", references_dir=references_dir)
 
             ctx = RecordingPluginContext(references_dir_probe_lies=True)
-            with self.assertLogs(level="WARNING") as logs:
+            with self.assertLogs(level="DEBUG") as logs:
                 summary = hpk.register_plugin(ctx, self._module(), skills=(skill,))
 
         self.assertEqual(summary.skills, ("sample",))

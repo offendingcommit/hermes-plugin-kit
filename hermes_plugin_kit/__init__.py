@@ -200,6 +200,42 @@ def _call_session_db(
     return method(*args, **kwargs)
 
 
+#: Where Hermes has exposed its skill companion-file support, newest first.
+#:
+#: The host serves `references/`, `templates/`, `assets/` and `scripts/`
+#: alongside a skill body through its own skills tool -- it has done so since
+#: at least the revision this kit pins -- and returns them as `linked_files`.
+#: That route has nothing to do with `register_skill`'s signature, so probing
+#: the signature alone cannot see it.
+#:
+#: The module moved during an upstream refactor, hence a list rather than one
+#: path. A name missing from every candidate means "could not tell", never
+#: "the host cannot do it".
+_HOST_COMPANION_FILE_PROBES = (
+    ("tools.skills_tool_plugin", "_plugin_skill_linked_files"),
+    ("tools.skills_tool", "_plugin_skill_linked_files"),
+)
+
+
+def _host_serves_skill_companion_files() -> bool | None:
+    """Whether the host serves skill companion files through its skills tool.
+
+    ``True`` when a known support routine is importable, ``None`` when that
+    cannot be determined. Never ``False``: absence of a private helper the kit
+    happens to know about is not evidence the host lacks the capability, and
+    treating it as such is what produced a warning telling plugin authors to
+    build a workaround for something that already worked.
+    """
+    for module_name, attribute in _HOST_COMPANION_FILE_PROBES:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+        if getattr(module, attribute, None) is not None:
+            return True
+    return None
+
+
 def _signature_accepts_kwarg(callable_obj: Any, name: str) -> bool:
     """Return whether ``callable_obj``'s live signature has ``name`` or accepts ``**kwargs``.
 
@@ -776,13 +812,31 @@ def _split_params(params: dict | None) -> tuple[dict, list, dict]:
 
 
 def _augment_description(description: str, required: list, examples: dict) -> str:
-    if not required:
-        return description
-    bits = [
-        f"`{key}`" + (f" (e.g. {examples[key]!r})" if key in examples else "")
-        for key in required
+    """Surface required keys and every supplied example.
+
+    Examples used to reach the model only for required keys: an example on an
+    optional key was collected and then dropped, so a plugin could ship a
+    perfectly good one that no agent ever saw. An example is guidance about
+    shape; whether the key is mandatory is a separate fact, and conflating
+    them silently discarded the guidance.
+    """
+    parts = [description]
+    if required:
+        bits = [
+            f"`{key}`" + (f" (e.g. {examples[key]!r})" if key in examples else "")
+            for key in required
+        ]
+        parts.append(f"Required: {', '.join(bits)}.")
+
+    optional_examples = [
+        f"`{key}` (e.g. {examples[key]!r})"
+        for key in examples
+        if key not in required
     ]
-    return f"{description} Required: {', '.join(bits)}."
+    if optional_examples:
+        parts.append(f"Optional: {', '.join(optional_examples)}.")
+
+    return " ".join(parts)
 
 
 def build_schema(name: str, description: str, params: dict | None) -> dict:
@@ -1371,6 +1425,10 @@ def _default_reference_tool_name(skill_name: str) -> str:
     return f"{normalized}_read_reference"
 
 
+#: How many reference filenames to name before summarising the rest.
+_REFERENCE_NAMES_IN_DESCRIPTION = 8
+
+
 def plugin_reference_tool(
     skill: PluginSkill,
     *,
@@ -1412,11 +1470,37 @@ def plugin_reference_tool(
 
     references_dir = skill.references_dir
     tool_name = name or _default_reference_tool_name(skill.name)
-    tool_description = description or (
-        f"List or read companion reference files for the {skill.name!r} skill. Omit file_path "
-        "to list every available file; pass either a listed path or its skill-relative "
-        "references/<path> form to read one file's content."
+    # Name the files in the default description. An agent selects tools by
+    # description at call time, so a tool that lists nothing asks it to spend a
+    # speculative no-argument call to discover whether anything is worth
+    # reading -- a cost it will not pay for a tool that promises nothing. Two
+    # readers built this way were registered on three deployed profiles and
+    # called zero times in eight days. references_dir is known here, so the
+    # names cost nothing.
+    available = sorted(
+        candidate.relative_to(references_dir.resolve()).as_posix()
+        for candidate in references_dir.resolve().rglob("*")
+        if candidate.is_file()
     )
+    if description:
+        tool_description = description
+    elif available:
+        shown = ", ".join(available[:_REFERENCE_NAMES_IN_DESCRIPTION])
+        if len(available) > _REFERENCE_NAMES_IN_DESCRIPTION:
+            shown += f", and {len(available) - _REFERENCE_NAMES_IN_DESCRIPTION} more"
+        tool_description = (
+            f"Read the {skill.name!r} skill's companion reference files: {shown}. "
+            f"Consult these before acting on that skill when the details matter. "
+            f"Omit file_path to list every file; pass a listed path, or its "
+            f"skill-relative references/<path> form, to read one."
+        )
+    else:
+        tool_description = (
+            f"List or read companion reference files for the {skill.name!r} skill. "
+            f"No files are present yet. Omit file_path to list every available "
+            f"file; pass either a listed path or its skill-relative "
+            f"references/<path> form to read one file's content."
+        )
 
     def _read_plugin_reference(args: dict, **_: Any) -> dict:
         file_path = args.get("file_path")
@@ -2559,13 +2643,27 @@ def register_plugin(
         if wants_references_dir and _signature_accepts_kwarg(ctx.register_skill, "references_dir"):
             skill_kwargs["references_dir"] = skill.references_dir
         elif wants_references_dir:
-            log.warning(
-                "hermes_plugin_kit: host register_skill() does not yet accept references_dir; "
-                "name=%s references_dir=%s will not be surfaced to the agent until the host "
-                "adds support",
-                skill.name,
-                skill.references_dir,
-            )
+            # Say only what was observed. register_skill not taking the kwarg
+            # means the kwarg was not taken -- it does not mean the files go
+            # unserved, because the host's skills tool serves them by another
+            # route entirely.
+            if _host_serves_skill_companion_files():
+                log.debug(
+                    "hermes_plugin_kit: host register_skill() does not accept references_dir; "
+                    "name=%s references_dir=%s is served by the host's skills tool instead "
+                    "(returned as linked_files alongside the skill body)",
+                    skill.name,
+                    skill.references_dir,
+                )
+            else:
+                log.info(
+                    "hermes_plugin_kit: host register_skill() does not accept references_dir; "
+                    "name=%s references_dir=%s was not passed through it. Hermes may still "
+                    "serve these files through its skills tool -- check skill_view before "
+                    "assuming otherwise. Use plugin_reference_tool only if it does not",
+                    skill.name,
+                    skill.references_dir,
+                )
 
         # The signature probe above can be fooled by a permissive **kwargs shape (a bare
         # Mock(spec=...) test double, or a decorator applied without functools.wraps) that
