@@ -616,3 +616,75 @@ class ImportHygieneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EnvironmentAgnosticTests(unittest.TestCase):
+    """The harness runs on machines this repository will never see.
+
+    A consumer's CI may have no home directory, no git, no network, or a
+    Windows path layout. None of those may turn into a hang or an opaque
+    traceback from inside a test-support library.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+
+    def test_an_explicit_cache_override_wins_over_every_convention(self) -> None:
+        import os
+
+        previous = os.environ.get(hpk_testing.CACHE_DIR_ENV)
+        os.environ[hpk_testing.CACHE_DIR_ENV] = str(self.root / "explicit")
+        self.addCleanup(
+            lambda: os.environ.__setitem__(hpk_testing.CACHE_DIR_ENV, previous)
+            if previous is not None
+            else os.environ.pop(hpk_testing.CACHE_DIR_ENV, None)
+        )
+
+        self.assertEqual(self.root / "explicit", hpk_testing._default_cache_dir())
+
+    def test_the_cache_location_is_always_resolvable(self) -> None:
+        # Never raises, whatever the platform conventions happen to be.
+        self.assertIsInstance(hpk_testing._default_cache_dir(), Path)
+
+    def test_a_missing_git_is_an_unavailable_result_not_a_traceback(self) -> None:
+        resolved = hpk_testing.resolve_hermes_checkout(
+            cache_dir=self.root / "cache", env={},
+            fetcher=lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")),
+        )
+
+        self.assertFalse(resolved.available)
+        self.assertIn(hpk_testing.DEPLOYED_HERMES_REVISION, resolved.detail)
+        self.assertIsNone(resolved.plugin_context_class())
+
+    def test_a_slow_fetch_is_abandoned_rather_than_hanging(self) -> None:
+        resolved = hpk_testing.resolve_hermes_checkout(
+            cache_dir=self.root / "cache", env={}, timeout=1,
+            fetcher=lambda *a, **k: (_ for _ in ()).throw(
+                subprocess.TimeoutExpired("git", 1)
+            ),
+        )
+
+        self.assertFalse(resolved.available)
+        self.assertIn("1s", resolved.detail)
+
+    def test_every_unavailable_path_yields_an_unchecked_report(self) -> None:
+        """Whatever went wrong, the caller gets the same honest shape."""
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        _register_a_tool(ctx)
+
+        for label, fetcher in {
+            "no git": lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")),
+            "offline": lambda *a, **k: (_ for _ in ()).throw(OSError("unreachable")),
+            "timeout": lambda *a, **k: (_ for _ in ()).throw(
+                subprocess.TimeoutExpired("git", 1)
+            ),
+        }.items():
+            with self.subTest(case=label):
+                resolved = hpk_testing.resolve_hermes_checkout(
+                    cache_dir=self.root / label.replace(" ", "-"), env={}, fetcher=fetcher
+                )
+                report = ctx.check_against_host(resolved.plugin_context_class())
+                self.assertFalse(report.checked)
+                self.assertFalse(report.clean)

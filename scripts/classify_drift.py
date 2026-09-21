@@ -50,17 +50,42 @@ def load_baseline(path: Path = BASELINE) -> dict[str, str]:
     return entries
 
 
-def fingerprint(body: str) -> str:
-    """A short stable digest of what actually went wrong.
+#: Text that differs between machines and runs, and so must never reach a
+#: fingerprint. A baseline is committed once and matched everywhere; if it
+#: absorbed a home directory, a temp path, a port, or a PID, it would match on
+#: the machine that produced it and nowhere else.
+_VOLATILE = (
+    # Windows and POSIX absolute paths, including UNC.
+    (re.compile(r"[A-Za-z]:[\\/][^\s'\"]*"), " path "),
+    (re.compile(r"(?<![\w])/[^\s'\"]*"), " path "),
+    # Hex object addresses and sha-like runs.
+    (re.compile(r"0x[0-9a-fA-F]+"), " addr "),
+    (re.compile(r"\b[0-9a-f]{7,}\b"), " hash "),
+    # Ports, PIDs, line numbers, byte counts.
+    (re.compile(r"\b\d{2,}\b"), " n "),
+)
 
-    Uses the assertion or error text rather than the whole traceback, so a line
-    number shifting does not read as a new break, while a changed message does.
+
+def normalize(text: str) -> str:
+    """Strip everything that varies by machine or run."""
+    for pattern, replacement in _VOLATILE:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def fingerprint(body: str) -> str:
+    """A short digest of what went wrong, stable across machines.
+
+    Uses the assertion or error text rather than the whole traceback, so a
+    shifting line number does not read as a new break while a changed message
+    does -- and normalizes the parts that differ per machine, so a baseline
+    committed from a laptop still matches in CI.
     """
     for line in reversed(body.strip().splitlines()):
         line = line.strip()
         if not line or line.startswith(("File \"", "Traceback", "~", "^")):
             continue
-        slug = re.sub(r"[^a-z0-9]+", "-", line.lower()).strip("-")
+        slug = re.sub(r"[^a-z0-9]+", "-", normalize(line).lower()).strip("-")
         return slug[:80] or "unknown"
     return "unknown"
 

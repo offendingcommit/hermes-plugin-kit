@@ -68,7 +68,7 @@ jobs:
       - name: Classify and report drift
         if: always()
         run: |
-          python3 scripts/classify_drift.py contract.log "${{ steps.upstream.outputs.revision }}" \
+          uv run python scripts/classify_drift.py contract.log "${{ steps.upstream.outputs.revision }}" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           new_drift=${PIPESTATUS[0]}
           tail -40 contract.log >> "$GITHUB_STEP_SUMMARY" || true
