@@ -4,7 +4,8 @@ uv := env_var_or_default("UV", "uv")
 openspec := env_var_or_default("OPENSPEC", "openspec")
 openspec_min := "1.13.1"
 hermes_agent_repo := env_var_or_default("HERMES_AGENT_REPO", "https://github.com/NousResearch/hermes-agent.git")
-hermes_agent_dir := env_var_or_default("HERMES_AGENT_DIR", ".hermes-agent")
+hermes_pinned_dir := env_var_or_default("HERMES_PINNED_DIR", ".hermes-agent-pinned")
+hermes_upstream_dir := env_var_or_default("HERMES_UPSTREAM_DIR", ".hermes-agent-upstream")
 
 # Show available recipes.
 default:
@@ -37,32 +38,91 @@ release-attach-trigger:
     test "$(git branch --show-current)" = "main"
     test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
-# Prepare a local Hermes checkout unless the caller supplied one.
+# Check out hermes-agent at a given ref, in a directory of its own.
+#
+# Each ref gets its own directory. Sharing one meant a pinned checkout left a
+# detached HEAD behind, and the next upstream run's `pull --ff-only || true`
+# swallowed the resulting error -- so it silently re-tested the pin while
+# reporting upstream.
 [private]
-prepare-hermes-agent:
+prepare-hermes-ref ref dir:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -n "${HERMES_AGENT_PATH:-}" ]]; then
-      exit 0
-    elif [[ -d "{{ hermes_agent_dir }}/.git" ]]; then
-      echo "Updating {{ hermes_agent_dir }}"
-      git -C "{{ hermes_agent_dir }}" pull --ff-only -q || true
+    if [[ -d "{{ dir }}/.git" ]]; then
+      git -C "{{ dir }}" fetch -q --depth 1 origin "{{ ref }}"
     else
-      echo "Cloning hermes-agent into {{ hermes_agent_dir }}"
-      git clone --depth 1 "{{ hermes_agent_repo }}" "{{ hermes_agent_dir }}"
+      echo "Cloning hermes-agent into {{ dir }}"
+      git init -q "{{ dir }}"
+      git -C "{{ dir }}" remote add origin "{{ hermes_agent_repo }}"
+      git -C "{{ dir }}" fetch -q --depth 1 origin "{{ ref }}"
     fi
+    git -C "{{ dir }}" checkout -q FETCH_HEAD
+    echo "hermes-agent at $(git -C "{{ dir }}" rev-parse HEAD)"
 
-# Run contract tests against an existing or locally managed Hermes checkout.
-test-contract: prepare-hermes-agent
+# Run the full contract suite against the deployed pin.
+#
+# HERMES_EXPECTED_REVISION makes the lane refuse a checkout at any other
+# revision, so a stale HERMES_AGENT_PATH cannot receipt the wrong host.
+test-contract-pinned:
     #!/usr/bin/env bash
     set -euo pipefail
-    hermes_path="${HERMES_AGENT_PATH:-{{ hermes_agent_dir }}}"
-    HERMES_AGENT_PATH="$(cd "$hermes_path" && pwd)" \
-      {{ uv }} run python -m unittest tests.test_hermes_contract -v
+    pin="$({{ uv }} run python -c 'from hermes_plugin_kit.testing import DEPLOYED_HERMES_REVISION as r; print(r)')"
+    dir="${HERMES_AGENT_PATH:-{{ hermes_pinned_dir }}}"
+    if [[ -z "${HERMES_AGENT_PATH:-}" ]]; then
+      just prepare-hermes-ref "$pin" "{{ hermes_pinned_dir }}"
+    fi
+    HERMES_CONTRACT_REQUIRED=1 HERMES_EXPECTED_REVISION="$pin" \
+      HERMES_AGENT_PATH="$(cd "$dir" && pwd)" \
+      just _run-contract-suite "pinned $pin"
 
-# Run the context-engine contract against HERMES_AGENT_PATH.
+# Run the full contract suite against upstream main -- the drift lane.
+test-contract-upstream:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dir="${HERMES_AGENT_PATH:-{{ hermes_upstream_dir }}}"
+    if [[ -z "${HERMES_AGENT_PATH:-}" ]]; then
+      just prepare-hermes-ref main "{{ hermes_upstream_dir }}"
+    fi
+    rev="$(git -C "$dir" rev-parse HEAD)"
+    HERMES_CONTRACT_REQUIRED=1 HERMES_AGENT_PATH="$(cd "$dir" && pwd)" \
+      just _run-contract-suite "upstream $rev"
+
+# Backwards-compatible alias for the upstream lane.
+test-contract: test-contract-upstream
+
+# Run both contract modules and prove the run actually executed checks.
+#
+# The exit status alone cannot say whether anything ran: on Python 3.11 --
+# the version CI pins -- unittest exits 0 both when every test skips and when
+# zero tests are collected. So the executed count is the evidence.
+[private]
+_run-contract-suite label:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    log="$(mktemp)"
+    trap 'rm -f "$log"' EXIT
+    set +e
+    {{ uv }} run python -m unittest tests.test_hermes_contract tests.test_context_engine_contract -v \
+      > "$log" 2>&1
+    echo "EXIT=$?" >> "$log"
+    set -e
+    tail -25 "$log"
+    grep -qE '^EXIT=0' "$log" || { echo "contract suite failed ({{ label }})" >&2; exit 1; }
+    ran="$(grep -oE '^Ran [0-9]+' "$log" | grep -oE '[0-9]+' | head -n1)"
+    test -n "$ran" && [ "$ran" -gt 0 ] \
+      || { echo "no contract tests ran ({{ label }}); a lane that checked nothing is not a lane that passed" >&2; exit 1; }
+    if grep -qE 'OK \(skipped=' "$log"; then
+      echo "contract suite skipped tests ({{ label }}); expected a host for every case" >&2
+      exit 1
+    fi
+    echo "contract receipt: {{ label }}; executed=$ran"
+
+# Run the context-engine contract. Requires an explicit checkout.
 test-context-engine-contract:
-    {{ uv }} run python -m unittest tests.test_context_engine_contract -v
+    #!/usr/bin/env bash
+    set -euo pipefail
+    : "${HERMES_AGENT_PATH:?set it to a hermes-agent checkout; this lane does not guess}"
+    HERMES_CONTRACT_REQUIRED=1 {{ uv }} run python -m unittest tests.test_context_engine_contract -v
 
 # Refuse to run when the installed OpenSpec predates the archive-correctness fixes.
 [private]

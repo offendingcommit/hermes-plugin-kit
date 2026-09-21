@@ -32,21 +32,24 @@ from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import hermes_plugin_kit as hpk
+try:  # `unittest discover -s tests` puts tests/ on sys.path; `-m tests.x` does not.
+    from tests import _hermes_host
+except ImportError:  # pragma: no cover - depends on how the suite was invoked
+    import _hermes_host
 
 
 def _import_real_hermes():
-    """Return real plugin runtime APIs, failing when an explicit checkout is invalid."""
-    candidates: list[Path] = []
-    env_path = os.environ.get("HERMES_AGENT_PATH")
-    if env_path:
-        explicit_root = Path(env_path)
-        if not (explicit_root / "hermes_cli" / "plugins.py").exists():
-            raise FileNotFoundError(
-                f"HERMES_AGENT_PATH has no hermes_cli/plugins.py: {explicit_root}"
-            )
-        sys.path.insert(0, str(explicit_root))
-    candidates.append(Path.home() / "hermes-agent")
-    candidates.append(Path.home() / ".hermes" / "hermes-agent")
+    """Return real plugin runtime APIs from the checkout the caller named.
+
+    Discovery lives in `tests/_hermes_host.py` so both contract modules share
+    one policy. Nothing is auto-discovered: a `~/hermes-agent` fallback is what
+    made a bare `just test` exercise whatever branch a developer had, while CI
+    skipped the module entirely.
+    """
+    root = _hermes_host.host_root()
+    if root is None:
+        return None
+    sys.path.insert(0, str(root))
 
     def _try():
         from hermes_cli.plugins import (  # type: ignore
@@ -107,26 +110,14 @@ def _import_real_hermes():
             ContextEngine=ContextEngine,
         )
 
-    try:
-        return _try()
-    except Exception:
-        if env_path:
-            # An explicit contract checkout is authoritative in CI. Do not turn
-            # import or layout drift into a misleading skipped-green build.
-            raise
-
-    for root in candidates:
-        if not (root / "hermes_cli" / "plugins.py").exists():
-            continue
-        sys.path.insert(0, str(root))
-        try:
-            return _try()
-        except Exception:
-            continue
-    return None
+    # A named checkout is authoritative: import or layout drift must fail loudly
+    # rather than becoming a misleading skipped-green build.
+    return _try()
 
 
 _REAL = _import_real_hermes()
+
+ContractLaneGuard = _hermes_host.build_guard(_REAL, "test_hermes_contract")
 
 
 def _write_legacy_state_db(db_path: Path) -> None:
