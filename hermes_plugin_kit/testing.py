@@ -173,10 +173,18 @@ class RecordingPluginContext:
     call against a host as it is made, or call :meth:`check_against_host`
     afterwards to replay everything at once.
 
-    The shape knobs exist so both branches of the kit's own capability probe are
-    reachable from a test: ``supports_references_dir`` controls whether
-    ``register_skill`` advertises that keyword, and ``missing_registrars`` omits
-    a registrar entirely, which is how a host that predates a surface behaves.
+    The shape knobs exist so every branch of the kit's own capability probe is
+    reachable from a test:
+
+    - ``supports_references_dir`` -- whether ``register_skill`` advertises that
+      keyword at all.
+    - ``references_dir_probe_lies`` -- a permissive signature that satisfies the
+      probe and then rejects the keyword at call time. This is the shape that
+      fools a signature check, and the only way to reach the documented retry.
+    - ``register_skill_error`` -- raise this from ``register_skill``. Used to
+      prove the retry stays narrow and does not swallow an unrelated error.
+    - ``missing_registrars`` -- omit a registrar entirely, which is how a host
+      predating a surface behaves.
     """
 
     def __init__(
@@ -185,6 +193,8 @@ class RecordingPluginContext:
         name: str = "test-plugin",
         config: dict[str, Any] | None = None,
         supports_references_dir: bool = True,
+        references_dir_probe_lies: bool = False,
+        register_skill_error: BaseException | None = None,
         missing_registrars: Iterable[str] = (),
         strict_against: type | None = None,
         context_engine_result: bool = True,
@@ -223,6 +233,8 @@ class RecordingPluginContext:
         self._strict_against = strict_against
         self._install_registrars(
             supports_references_dir=supports_references_dir,
+            references_dir_probe_lies=references_dir_probe_lies,
+            register_skill_error=register_skill_error,
             missing=set(missing_registrars),
         )
 
@@ -242,7 +254,14 @@ class RecordingPluginContext:
         if detail is not None:
             raise TypeError(f"{registrar}: {detail}")
 
-    def _install_registrars(self, *, supports_references_dir: bool, missing: set[str]) -> None:
+    def _install_registrars(
+        self,
+        *,
+        supports_references_dir: bool,
+        references_dir_probe_lies: bool,
+        register_skill_error: BaseException | None,
+        missing: set[str],
+    ) -> None:
         """Bind registrars per instance, so an omitted one is genuinely absent.
 
         `register_plugin` detects host support with ``callable(getattr(ctx, name, None))``,
@@ -287,6 +306,20 @@ class RecordingPluginContext:
             self._record("register_skill", (), kwargs)
             self.skills.append(kwargs)
 
+        def register_skill_lying_probe(**kwargs) -> None:
+            # A permissive signature satisfies the kit's keyword probe, so the
+            # probe reports support this host does not have. Rejecting at call
+            # time is what drives the documented retry.
+            if "references_dir" in kwargs:
+                raise TypeError(
+                    "register_skill() got an unexpected keyword argument 'references_dir'"
+                )
+            self._record("register_skill", (), kwargs)
+            self.skills.append(kwargs)
+
+        def register_skill_raising(**kwargs) -> None:
+            raise register_skill_error
+
         def register_memory_provider(provider) -> None:
             self._record("register_memory_provider", (provider,), {})
             self.memory_providers.append(provider)
@@ -304,17 +337,24 @@ class RecordingPluginContext:
             self.context_engines.append(engine)
             return self.context_engine_result
 
+        def _pick_skill_registrar() -> Callable[..., Any]:
+            # Order matters: a raising host outranks the probe shapes, since a
+            # test asking for an error wants it regardless of the keyword.
+            if register_skill_error is not None:
+                return register_skill_raising
+            if references_dir_probe_lies:
+                return register_skill_lying_probe
+            if supports_references_dir:
+                return register_skill_with_references
+            return register_skill_only
+
         implementations: dict[str, Callable[..., Any]] = {
             "register_tool": register_tool,
             "register_command": register_command,
             "register_cli_command": register_cli_command,
             "register_middleware": register_middleware,
             "register_hook": register_hook,
-            "register_skill": (
-                register_skill_with_references
-                if supports_references_dir
-                else register_skill_only
-            ),
+            "register_skill": _pick_skill_registrar(),
             "register_memory_provider": register_memory_provider,
             "register_image_gen_provider": register_image_gen_provider,
             "register_video_gen_provider": register_video_gen_provider,

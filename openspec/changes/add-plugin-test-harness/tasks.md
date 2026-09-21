@@ -37,11 +37,11 @@
 
 ## 3. Host-shape coverage the kit's own tests need (U3)
 
-- [ ] 3.1 Add a mode whose `register_skill` advertises `references_dir` through
+- [x] 3.1 Add a mode whose `register_skill` advertises `references_dir` through
       a permissive signature but rejects it at call time, reproducing the host
       shape that fools the kit's capability probe. Verify: `register_plugin`
       takes its documented retry branch and the skill still registers.
-- [ ] 3.2 Add a mode whose `register_skill` raises a `TypeError` unrelated to
+- [x] 3.2 Add a mode whose `register_skill` raises a `TypeError` unrelated to
       `references_dir`. Verify: the retry does not swallow it and the error
       propagates.
 

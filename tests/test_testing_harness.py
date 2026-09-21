@@ -223,6 +223,41 @@ class HostShapeModeTests(unittest.TestCase):
 
         self.assertEqual(self.references_dir, str(ctx.skills[0]["references_dir"]))
 
+    def test_lying_probe_host_still_registers_the_skill(self) -> None:
+        """A permissive signature can report support the host does not have.
+
+        The kit probes `register_skill` for a `references_dir` keyword and
+        retries without it on a TypeError naming that keyword. A `**kwargs`
+        host satisfies the probe and can still reject the call, so the retry
+        branch needs a host shape that lies.
+        """
+        ctx = hpk_testing.RecordingPluginContext(
+            name="probe-plugin", references_dir_probe_lies=True
+        )
+
+        summary = hpk.register_plugin(
+            ctx, [], skills=[self._skill(with_references=True)], plugin_name="probe-plugin"
+        )
+
+        self.assertEqual(("probe-skill",), summary.skills)
+        self.assertNotIn("references_dir", ctx.skills[0])
+
+    def test_unrelated_type_error_is_not_swallowed_by_the_retry(self) -> None:
+        """The retry must be narrow: only a references_dir rejection."""
+        ctx = hpk_testing.RecordingPluginContext(
+            name="probe-plugin",
+            register_skill_error=TypeError(
+                "register_skill() missing 1 required positional argument"
+            ),
+        )
+
+        with self.assertRaises(TypeError) as caught:
+            hpk.register_plugin(
+                ctx, [], skills=[self._skill(with_references=True)], plugin_name="probe-plugin"
+            )
+
+        self.assertIn("missing 1 required positional argument", str(caught.exception))
+
     def test_missing_registrar_surfaces_the_unsupported_context_error(self) -> None:
         ctx = hpk_testing.RecordingPluginContext(
             name="probe-plugin", missing_registrars=("register_skill",)
