@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib
 import inspect
 import json
 import os
@@ -851,7 +852,27 @@ class HermesContractTests(unittest.TestCase):
         guidance goes stale silently, which is exactly how it went stale
         before.
         """
-        from tools.skills_tool import _plugin_skill_linked_files  # type: ignore
+        # Resolve through the kit's own probe list rather than a hardcoded
+        # module path: upstream has already moved this routine from
+        # `tools.skills_tool` to `tools.skills_tool_plugin`, and pinning one
+        # spelling here made the test report a module move as a contract
+        # break. The category set -- the thing the docs actually promise --
+        # is identical on both.
+        linked_files_fn = None
+        for module_name, attribute in hpk._HOST_COMPANION_FILE_PROBES:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                continue
+            linked_files_fn = getattr(module, attribute, None)
+            if linked_files_fn is not None:
+                break
+        self.assertIsNotNone(
+            linked_files_fn,
+            "no host companion-file routine found at any probed location: "
+            f"{hpk._HOST_COMPANION_FILE_PROBES}",
+        )
+        _plugin_skill_linked_files = linked_files_fn
 
         with tempfile.TemporaryDirectory() as tmp:
             skill_root = Path(tmp)
