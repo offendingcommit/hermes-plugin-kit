@@ -1,0 +1,36 @@
+schema: spec-driven
+
+context: |
+  hermes-plugin-kit is an installable Python package: a convention-correct
+  helper library for registering hermes-agent plugin commands, tools,
+  middleware, hooks, and skills. It is not a path-loaded runtime plugin.
+  Consumer plugins pin it to an immutable commit, and profiles installing
+  several plugins into one environment keep every consumer on the same kit
+  revision.
+
+  Stack: Python 3.11, uv, stdlib unittest (no pytest), just as the sole task
+  runner, python-semantic-release, GitHub Actions. AGENTS.md at the repo root
+  carries the binding working rules and takes precedence over anything here.
+
+  Conventions that shape most changes:
+  - Public API is re-exported from hermes_plugin_kit/__init__.py and listed in
+    __all__. Adding a documented name without adding it to __all__ is a
+    recurring defect.
+  - pyproject.toml declares packages as an explicit list, so a new subpackage
+    is silently omitted from the wheel. Prefer a flat module.
+  - Tests live in tests/ and run under unittest discovery. Contract tests
+    against a real hermes-agent checkout are gated on HERMES_AGENT_PATH.
+  - tests/test_release_contract.py parses the GitHub workflows and asserts
+    their shape: SHA-pinned actions, just-only steps, no pull_request_target.
+    Workflow changes belong there rather than in a parallel mechanism.
+  - Keep skills/hermes-plugins/references/plugin-kit.md aligned with public
+    API changes.
+
+rules:
+  proposal:
+    - State the user-visible consequence before the mechanism.
+    - Name the capability paths under Capabilities explicitly.
+  design:
+    - Record the alternatives that were rejected and why, not only the choice.
+  tasks:
+    - Every task names the verification that proves it done.
