@@ -6,6 +6,7 @@ import subprocess
 import tarfile
 import tempfile
 import re
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
@@ -795,12 +796,47 @@ class ContractGateShapeTests(unittest.TestCase):
                 test_id, _, fingerprint = entry.partition(" ")
                 self.assertTrue(test_id.strip() and fingerprint.strip())
 
-    def test_built_wheel_contains_the_harness_module(self) -> None:
-        # `twine check` reads metadata and never opens the archive, so it passes
-        # on a wheel missing a module entirely. Proven by probe during U4.
-        wheels = sorted((ROOT / "dist").glob("*.whl")) if (ROOT / "dist").exists() else []
-        if not wheels:
-            self.skipTest("no built wheel in dist/; `just build` first")
-        with zipfile.ZipFile(wheels[-1]) as archive:
-            names = archive.namelist()
-        self.assertIn("hermes_plugin_kit/testing.py", names)
+    def test_packaging_manifest_covers_every_package_directory(self) -> None:
+        """The trap this guards is a subpackage silently dropped from the wheel.
+
+        `pyproject.toml` lists packages explicitly, so a new package directory
+        is omitted from the build with no warning and `twine check` -- which
+        reads metadata, never the archive -- passes on the result.
+
+        This asserts the manifest against the source tree rather than against
+        a built wheel. An earlier version inspected `dist/`, which made it
+        depend on whatever happened to be lying there: it passed in CI, where
+        `dist/` is absent and the test skipped, and failed locally against a
+        stale artifact. Worse, mtime could not distinguish stale from wrong --
+        the wheel that caught this was *newer* than the source and still built
+        from a mutated tree. End-to-end proof belongs in `just check-install`,
+        which builds, installs and imports; this is the fast, deterministic
+        half.
+        """
+        manifest = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        declared = set(manifest["tool"]["setuptools"]["packages"])
+
+        package_root = ROOT / "hermes_plugin_kit"
+        on_disk = {"hermes_plugin_kit"} | {
+            ".".join(child.relative_to(ROOT).parts)
+            for child in package_root.rglob("*")
+            if child.is_dir() and (child / "__init__.py").exists()
+        }
+
+        missing = sorted(on_disk - declared)
+        self.assertEqual(
+            [], missing,
+            "package directories absent from pyproject's explicit packages list "
+            "are dropped from the wheel silently; twine check will not notice",
+        )
+
+    def test_the_harness_module_is_inside_a_declared_package(self) -> None:
+        manifest = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        declared = set(manifest["tool"]["setuptools"]["packages"])
+
+        self.assertTrue((ROOT / "hermes_plugin_kit" / "testing.py").is_file())
+        self.assertIn(
+            "hermes_plugin_kit", declared,
+            "the harness ships as a flat module inside this package; if it ever "
+            "becomes a subpackage it needs its own entry here",
+        )
