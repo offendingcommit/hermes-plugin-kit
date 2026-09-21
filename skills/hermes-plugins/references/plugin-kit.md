@@ -6,9 +6,17 @@ path-loaded Hermes plugin and not an upstream Hermes API.
 
 ## Canonical Local Sources
 
+Reachable from an installed kit — name these to a consumer:
+
+- Exported API and behavior: `hermes_plugin_kit` (the package's own `__all__`)
+- Consumer test support: `hermes_plugin_kit.testing`
+
+Present only in a checkout of this repository. A consumer installing via
+`git+…@sha` gets neither `tests/` nor `skills/`, so do not route them here:
+
 - Public guide and examples: [`README.md`](../../../README.md)
 - Maintainer rules: [`AGENTS.md`](../../../AGENTS.md)
-- Exported API and behavior: [`hermes_plugin_kit/__init__.py`](../../../hermes_plugin_kit/__init__.py)
+- Implementation: [`hermes_plugin_kit/__init__.py`](../../../hermes_plugin_kit/__init__.py)
 - Unit contracts: [`tests/test_kit.py`](../../../tests/test_kit.py)
 - Structured observability contracts:
   [`tests/test_observability.py`](../../../tests/test_observability.py)
@@ -32,6 +40,7 @@ guidance, not a second implementation specification.
 | Context engine | Hermes `ContextEngine` instance | `register_plugin(..., context_engine=...)` | Singular native engine registration; schemas and recovery dispatch stay in `get_tool_schemas()` / `handle_tool_call()`, never duplicated with `@tool`. |
 | Host-managed call | `invoke_host_tool` | None | Use for supported non-registry capabilities such as `send_message`; pre/post-tool hooks remain active. |
 | Local media delivery | `MediaPayload`, `MediaType`, `deliver_media` | Consumer registers suppression hooks | File must be absolute, present, and non-empty; `origin` resolves from task-local Hermes context. |
+| Checking a plugin against the real host | `RecordingPluginContext`, `resolve_hermes_checkout`, `check_registration`, `DEPLOYED_HERMES_REVISION` | None — test-time only | Records what the plugin registers, and its `check_against_host()` replays those calls against the real `PluginContext` signatures. Needs no host to record; reports `checked == False` rather than clean when it could not check. Requires kit 0.9.0 or newer. |
 | Correlated lifecycle receipt | `ObservabilityEvent`, `log_observability_event`, `new_correlation_id`, `credential_identity_hash` | None | Emits bounded, redacted JSON through the supplied local logger; consumers provide domain stages and never place credentials in event fields. |
 
 `RegistrationSummary` reports commands, tools, middleware, hooks, skills,
@@ -105,9 +114,16 @@ In this repository:
 ```bash
 just install
 just test
-just build
+just test-contract-pinned      # full contract suite at the deployed pin
 ```
 
-In a consumer, run its native suite plus registration and manifest-parity tests.
-Point contract tests at a real checkout with `HERMES_AGENT_PATH` when automatic
-checkout discovery is not appropriate.
+In a consumer, run its native suite plus registration and manifest-parity
+tests, then check against the real host through `hermes_plugin_kit.testing` —
+see the Validation section of [`SKILL.md`](../SKILL.md) for the worked call.
+That path is plain Python and needs no particular task runner.
+
+`HERMES_AGENT_PATH` points at an existing checkout and always wins over a
+fetch. `HERMES_PLUGIN_KIT_CACHE` controls where a fetched one is stored, for
+environments where the default cache location is wrong or unwritable. When
+neither a checkout nor a fetch is possible, the result is explicitly
+*unchecked* — read that as "not verified", never as "verified clean".
