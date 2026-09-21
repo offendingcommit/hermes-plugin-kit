@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-09-21
+
+# This change alters tooling and documentation only; it changes no
+# capability-level requirement, so it carries zero spec deltas.
+skip_specs: true
