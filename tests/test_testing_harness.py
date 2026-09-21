@@ -291,6 +291,138 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("plugin=probe-plugin", "\n".join(captured.output))
 
 
+class ReceiptFieldTests(unittest.TestCase):
+    """The receipt's log order is the external contract, not the dataclass order."""
+
+    def test_field_order_matches_the_emitted_receipt(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        with self.assertLogs("hermes_plugin_kit", level="INFO") as captured:
+            hpk.register_plugin(ctx, [], plugin_name="probe-plugin")
+
+        fields = hpk_testing.receipt_fields(captured.records[-1].getMessage())
+
+        self.assertEqual(list(hpk_testing.RECEIPT_FIELD_ORDER), list(fields))
+
+    def test_empty_surfaces_read_as_no_values(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        with self.assertLogs("hermes_plugin_kit", level="INFO") as captured:
+            hpk.register_plugin(ctx, [], plugin_name="probe-plugin")
+
+        fields = hpk_testing.receipt_fields(captured.records[-1].getMessage())
+
+        self.assertEqual((), fields["tools"])
+
+    def test_registered_names_appear_under_their_field(self) -> None:
+        # Captured at the root, not under "hermes_plugin_kit": the kit logs the
+        # receipt through the decorated handler's own module logger, so the
+        # logger name depends on where the plugin's tools are defined.
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+
+        @hpk.tool(name="probe_read_note", toolset="probe", description="Read a note.")
+        def probe_read_note(args, **kwargs):
+            return {"ok": True}
+
+        with self.assertLogs(level="INFO") as captured:
+            hpk.register_plugin(ctx, [probe_read_note], plugin_name="probe-plugin")
+
+        fields = hpk_testing.receipt_fields(captured.records[-1].getMessage())
+
+        self.assertEqual(("probe_read_note",), fields["tools"])
+        self.assertEqual((), fields["hooks"])
+
+    def test_declared_order_is_the_log_order_not_the_dataclass_order(self) -> None:
+        """These genuinely differ; pinning the wrong one silently passes."""
+        import dataclasses
+
+        dataclass_order = [f.name for f in dataclasses.fields(hpk.RegistrationSummary)]
+
+        self.assertNotEqual(dataclass_order, list(hpk_testing.RECEIPT_FIELD_ORDER))
+        self.assertEqual(
+            set(dataclass_order), set(hpk_testing.RECEIPT_FIELD_ORDER),
+            "the two orders must hold the same fields, only sequenced differently",
+        )
+
+
+class RegistrationCheckTests(unittest.TestCase):
+    """Contracts a consumer would otherwise copy out of the kit's own tests."""
+
+    def _tool(self, name):
+        @hpk.tool(name=name, toolset="probe", description=f"{name}.")
+        def handler(args, **kwargs):
+            return {"ok": True}
+
+        return handler
+
+    def test_sorted_registration_reports_clean(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        hpk.register_plugin(
+            ctx, [self._tool("probe_zulu"), self._tool("probe_alpha")],
+            plugin_name="probe-plugin",
+        )
+
+        result = hpk_testing.check_registration(ctx)
+
+        self.assertTrue(result.ok, result)
+        self.assertEqual((), result.problems)
+
+    def test_unsorted_recording_is_reported(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        ctx.register_tool(
+            name="probe_zulu", toolset="probe", schema={}, handler=None,
+            requires_env=None, description="z", emoji="",
+        )
+        ctx.register_tool(
+            name="probe_alpha", toolset="probe", schema={}, handler=None,
+            requires_env=None, description="a", emoji="",
+        )
+
+        result = hpk_testing.check_registration(ctx)
+
+        self.assertFalse(result.ok, result)
+        self.assertTrue(any("order" in p for p in result.problems), result.problems)
+
+    def test_duplicate_tool_name_is_reported(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        for _ in range(2):
+            ctx.register_tool(
+                name="probe_same", toolset="probe", schema={}, handler=None,
+                requires_env=None, description="d", emoji="",
+            )
+
+        result = hpk_testing.check_registration(ctx)
+
+        self.assertFalse(result.ok, result)
+        self.assertTrue(any("duplicate" in p for p in result.problems), result.problems)
+
+    def test_same_name_across_slash_and_cli_is_allowed(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        ctx.register_command(name="probe", handler=None, description="d")
+        ctx.register_cli_command(name="probe", handler=None, description="d")
+
+        self.assertTrue(hpk_testing.check_registration(ctx).ok)
+
+    def test_flattened_tool_schema_is_reported(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        ctx.register_tool(
+            name="probe_flat", toolset="probe",
+            schema={"name": "probe_flat", "properties": {"a": {"type": "string"}}},
+            handler=None, requires_env=None, description="d", emoji="",
+        )
+
+        result = hpk_testing.check_registration(ctx)
+
+        self.assertFalse(result.ok, result)
+        self.assertTrue(
+            any("function.parameters" in p for p in result.problems), result.problems
+        )
+
+    def test_conforming_schema_passes(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        hpk.register_plugin(ctx, [self._tool("probe_ok")], plugin_name="probe-plugin")
+
+        self.assertTrue(hpk_testing.check_registration(ctx).ok)
+
+
 class ImportHygieneTests(unittest.TestCase):
     """The module ships in the wheel and must cost nothing until it is used."""
 

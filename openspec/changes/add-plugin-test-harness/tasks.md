@@ -24,14 +24,14 @@
 
 ## 2. Registration and schema assertions (U3)
 
-- [ ] 2.1 Add the receipt assertion, pinned to the emitted log field order
+- [x] 2.1 Add the receipt assertion, pinned to the emitted log field order
       rather than the dataclass order. Verify: a permuted field order fails.
-- [ ] 2.2 Add duplicate-detection and deterministic-ordering assertions.
+- [x] 2.2 Add duplicate-detection and deterministic-ordering assertions.
       Verify: a duplicate tool name fails while the same name across a slash and
       a CLI command passes; out-of-order registration still yields sorted output.
-- [ ] 2.3 Add the schema-convention assertion. Verify: a schema with flattened
+- [x] 2.3 Add the schema-convention assertion. Verify: a schema with flattened
       top-level arguments fails and a conforming one passes.
-- [ ] 2.4 Add the drift report that names the registrar and parameter, shaped
+- [x] 2.4 Add the drift report that names the registrar and parameter, shaped
       like the kit's existing structured receipts. Verify: the report names the
       added parameter against a drifted host and reports clean otherwise.
 
