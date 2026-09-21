@@ -840,5 +840,51 @@ class HermesContractTests(unittest.TestCase):
             bot.shutdown.assert_awaited_once()
 
 
+    def test_host_serves_plugin_skill_companion_files_from_four_fixed_dirs(self) -> None:
+        """Pin the convention the kit's docs tell plugin authors to follow.
+
+        ``register_skill`` has no ``references_dir`` parameter and needs none:
+        the host derives companion files from the ``SKILL.md`` directory. The
+        kit therefore documents "name it one of these four, put it beside
+        SKILL.md" -- a claim about the host, so it belongs in the contract
+        lane. If the category set or the traversal changes upstream, that
+        guidance goes stale silently, which is exactly how it went stale
+        before.
+        """
+        from tools.skills_tool import _plugin_skill_linked_files  # type: ignore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            skill_root = Path(tmp)
+            (skill_root / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+            for category in ("references", "templates", "assets", "scripts"):
+                (skill_root / category).mkdir()
+            # Any file type, at any depth -- not just top-level *.md.
+            (skill_root / "references" / "guide.md").write_text("g", encoding="utf-8")
+            (skill_root / "references" / "nested").mkdir()
+            (skill_root / "references" / "nested" / "data.csv").write_text("a,b", encoding="utf-8")
+            (skill_root / "templates" / "t.py").write_text("x = 1", encoding="utf-8")
+            (skill_root / "assets" / "logo.png").write_bytes(b"\x89PNG")
+            (skill_root / "scripts" / "run.sh").write_text("echo hi", encoding="utf-8")
+            # A directory outside the convention must not be surfaced.
+            (skill_root / "docs").mkdir()
+            (skill_root / "docs" / "ignored.md").write_text("no", encoding="utf-8")
+
+            linked = _plugin_skill_linked_files(skill_root)
+
+        self.assertIsNotNone(linked, "host returned no companion files at all")
+        self.assertEqual(
+            sorted(linked),
+            ["assets", "references", "scripts", "templates"],
+            "the documented category set no longer matches the host",
+        )
+        self.assertNotIn("docs", linked)
+        self.assertIn(
+            str(Path("references") / "nested" / "data.csv"),
+            linked["references"],
+            "nested and non-markdown companion files are documented as served",
+        )
+        self.assertIn(str(Path("assets") / "logo.png"), linked["assets"])
+
+
 if __name__ == "__main__":
     unittest.main()
