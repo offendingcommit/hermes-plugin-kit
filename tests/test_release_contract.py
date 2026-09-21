@@ -504,7 +504,14 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         build_text = yaml.safe_dump(build)
         hermes_text = yaml.safe_dump(jobs["hermes-contract"])
-        self.assertIn("just test-contract", hermes_text)
+        # Specifically the pinned lane. A release promises conformance at the
+        # revision the kit supports; gating on upstream lets a break we
+        # deliberately scoped out block every release. `test-contract` alone
+        # would match either lane, so assert the pinned one and rule out the
+        # upstream alias.
+        self.assertIn("just test-contract-pinned", hermes_text)
+        self.assertNotIn("just test-contract-upstream", hermes_text)
+        self.assertNotIn("just test-contract\n", hermes_text)
         self.assertNotIn("just test-contract", build_text)
         self.assertNotIn(".hermes-agent", build_text)
         self.assertIn("just build", build_text)
