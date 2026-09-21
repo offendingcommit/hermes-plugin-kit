@@ -36,11 +36,18 @@ signatures wherever a Hermes checkout is importable.
   required parameter
 - **THEN** the replay fails and names the missing parameter
 
-#### Scenario: Host renames a parameter
+#### Scenario: Host renames a keyword parameter
 
 - **WHEN** a plugin registers against a host whose registrar has renamed a
-  parameter the plugin passes
+  parameter the plugin passes by keyword
 - **THEN** the replay fails and names the unexpected keyword
+
+#### Scenario: Host renames a positional parameter
+
+- **WHEN** a plugin registers against a host whose registrar has renamed a
+  parameter the plugin passes positionally, leaving arity unchanged
+- **THEN** the replay fails and names both the old and the new parameter name,
+  rather than reporting clean because the call still binds by position
 
 #### Scenario: Host removes a registrar
 

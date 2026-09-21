@@ -103,6 +103,32 @@ class DriftReplayTests(unittest.TestCase):
         self.assertFalse(report.clean, report)
         self.assertIn("description", report.drifts[0].detail)
 
+    def test_positionally_renamed_parameter_is_reported(self) -> None:
+        """Binding alone cannot see this: Python binds positionals by position."""
+
+        class HostRenamedPositional:
+            # Same arity as the real host, first parameter renamed.
+            def register_hook(self, event_name, callback): ...
+
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        ctx.register_hook("pre_tool_call", lambda *a, **k: None)
+
+        report = ctx.check_against_host(HostRenamedPositional)
+
+        self.assertFalse(report.clean, report)
+        self.assertEqual(["register_hook"], [d.registrar for d in report.drifts])
+        self.assertIn("hook_name", report.drifts[0].detail)
+        self.assertIn("event_name", report.drifts[0].detail)
+
+    def test_unrenamed_positional_host_stays_clean(self) -> None:
+        class HostPositionalV1:
+            def register_hook(self, hook_name, callback): ...
+
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        ctx.register_hook("pre_tool_call", lambda *a, **k: None)
+
+        self.assertTrue(ctx.check_against_host(HostPositionalV1).clean)
+
     def test_removed_registrar_is_reported(self) -> None:
         ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
         _register_a_skill(ctx)
