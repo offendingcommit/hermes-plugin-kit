@@ -6,4 +6,6 @@ dist/
 .venv/
 .eggs/
 .hermes-agent/
+.hermes-agent-pinned/
+.hermes-agent-upstream/
 .DS_Store

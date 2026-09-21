@@ -31,6 +31,7 @@ from __future__ import annotations
 import inspect
 import os
 import subprocess
+import tempfile
 import sys
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 __all__ = [
+    "CACHE_DIR_ENV",
     "DEPLOYED_HERMES_REVISION",
     "RECEIPT_FIELD_ORDER",
     "CheckResult",
@@ -688,6 +690,34 @@ def resolve_hermes_checkout(
     return ResolvedHost(cache, head, f"fetched {revision}")
 
 
+#: Overrides where a fetched checkout is cached. Set this in any environment
+#: where the defaults below are wrong or unwritable -- a container with no home
+#: directory, a read-only image, a CI runner with its own cache mount.
+CACHE_DIR_ENV = "HERMES_PLUGIN_KIT_CACHE"
+
+
 def _default_cache_dir() -> Path:
-    base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
-    return Path(base) / "hermes-plugin-kit" / "hermes-agent"
+    """Where to cache a fetched checkout, without assuming an OS or a layout.
+
+    An explicit override wins, then each platform's own convention, then a
+    temp directory. The last step matters: a home directory is not guaranteed
+    to exist or be writable in a container, and a library that assumed one
+    would fail there for a reason the caller cannot act on.
+    """
+    override = (os.environ.get(CACHE_DIR_ENV) or "").strip()
+    if override:
+        return Path(override)
+
+    for variable in ("XDG_CACHE_HOME", "LOCALAPPDATA"):
+        base = (os.environ.get(variable) or "").strip()
+        if base:
+            return Path(base) / "hermes-plugin-kit" / "hermes-agent"
+
+    try:
+        home = Path.home()
+    except (RuntimeError, OSError):  # no resolvable home, e.g. a bare container
+        home = None
+    if home is not None and os.access(home, os.W_OK):
+        return home / ".cache" / "hermes-plugin-kit" / "hermes-agent"
+
+    return Path(tempfile.gettempdir()) / "hermes-plugin-kit" / "hermes-agent"
