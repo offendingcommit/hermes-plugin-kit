@@ -8,20 +8,21 @@ import os
 import subprocess
 import sys
 import unittest
+
+try:  # `unittest discover -s tests` puts tests/ on sys.path; `-m tests.x` does not.
+    from tests import _hermes_host
+except ImportError:  # pragma: no cover - depends on how the suite was invoked
+    import _hermes_host
 from pathlib import Path
 
 import hermes_plugin_kit as hpk
 
 
 def _import_deployed_host():
-    root_value = os.environ.get("HERMES_AGENT_PATH")
-    if not root_value:
+    """Resolve the deployed host through the shared policy (see _hermes_host)."""
+    root = _hermes_host.host_root()
+    if root is None:
         return None
-    root = Path(root_value)
-    if not (root / "hermes_cli" / "plugins.py").exists():
-        raise FileNotFoundError(
-            f"HERMES_AGENT_PATH has no hermes_cli/plugins.py: {root}"
-        )
     sys.path.insert(0, str(root))
     from agent.context_engine import ContextEngine  # type: ignore
     from hermes_cli.plugins import (  # type: ignore
@@ -34,6 +35,8 @@ def _import_deployed_host():
 
 
 _HOST = _import_deployed_host()
+
+ContractLaneGuard = _hermes_host.build_guard(_HOST, "test_context_engine_contract")
 
 
 @unittest.skipUnless(_HOST is not None, "exact Hermes host source not configured")
