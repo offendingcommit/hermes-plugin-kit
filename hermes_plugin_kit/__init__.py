@@ -819,9 +819,14 @@ def _augment_description(description: str, required: list, examples: dict) -> st
     perfectly good one that no agent ever saw. An example is guidance about
     shape; whether the key is mandatory is a separate fact, and conflating
     them silently discarded the guidance.
+
+    A clause is skipped when the supplied description already carries its
+    label. Hand-written Hermes schemas often spell their own requirements out
+    in prose, and appending a second "Required:" would contradict rather than
+    clarify.
     """
     parts = [description]
-    if required:
+    if required and "Required:" not in description:
         bits = [
             f"`{key}`" + (f" (e.g. {examples[key]!r})" if key in examples else "")
             for key in required
@@ -833,7 +838,7 @@ def _augment_description(description: str, required: list, examples: dict) -> st
         for key in examples
         if key not in required
     ]
-    if optional_examples:
+    if optional_examples and "Optional:" not in description:
         parts.append(f"Optional: {', '.join(optional_examples)}.")
 
     return " ".join(parts)
@@ -855,6 +860,27 @@ def build_schema(name: str, description: str, params: dict | None) -> dict:
         "description": _augment_description(description, required, examples),
         "parameters": parameters,
     }
+
+
+def _schema_examples(properties: dict) -> dict:
+    """Pull per-key examples out of a supplied Hermes function schema.
+
+    The kit's own ``params`` format carries a scalar ``_example``; a
+    hand-written Hermes schema carries the JSON Schema ``examples`` keyword,
+    a list. That is the spelling the host understands -- its schema sanitizer
+    names ``examples`` as a preserved metadata keyword and a non-schema
+    sibling ("list of example values"), and does not recognize a scalar
+    ``example``. So read ``examples`` and take the first entry, which is the
+    one a description can show without becoming a catalogue.
+    """
+    found: dict[str, Any] = {}
+    for key, spec in properties.items():
+        if not isinstance(spec, dict):
+            continue
+        values = spec.get("examples")
+        if isinstance(values, list) and values:
+            found[key] = values[0]
+    return found
 
 
 def _copy_and_validate_schema(
@@ -895,7 +921,9 @@ def _copy_and_validate_schema(
             "schema.parameters.required references unknown properties: "
             + ", ".join(unknown_required)
         )
-    copied["description"] = description
+    copied["description"] = _augment_description(
+        description, list(required), _schema_examples(properties)
+    )
     return copied
 
 
@@ -2127,7 +2155,7 @@ def tool(
                 for key in required
             }
             if schema is None
-            else {}
+            else _schema_examples(emitted_schema["parameters"].get("properties", {}))
         )
         log = logging.getLogger(fn.__module__ or "hermes_plugin_kit")
 

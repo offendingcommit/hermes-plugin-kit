@@ -169,6 +169,22 @@ references. Required fields stay visible to the model. The default
 set it to `False` only when an existing handler must retain its established
 validation and error payload.
 
+A supplied schema gets the same description guidance a `params` schema gets.
+The kit appends `Required:` and `Optional:` clauses built from the schema's own
+`required` list and the JSON Schema `examples` keyword on each property, and
+uses the first `examples` entry in missing-argument errors:
+
+```python
+"properties": {"content": {"type": "string", "examples": ["a short note"]}}
+# description becomes: "... Required: `content` (e.g. 'a short note')."
+```
+
+Use `examples` (the JSON Schema list), not a scalar `example` — the list is the
+spelling Hermes' schema sanitizer carries through. Nothing is appended when the
+schema declares no required properties and no examples, and a clause is skipped
+when your description already spells that label out itself, so prose you wrote
+by hand is never contradicted.
+
 ## Commands, middleware, hooks, and plugin skills
 
 Use the lifecycle entrypoint when a plugin provides more than tools:
