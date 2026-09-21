@@ -305,7 +305,14 @@ jobs:
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
           just test-contract-pinned
-          git -C .hermes-agent rev-parse HEAD > hermes-source-sha.txt
+          # Record the revision actually exercised, from the checkout the
+          # pinned lane created -- not the constant, so the evidence reflects
+          # what ran. Cross-check it against the constant so a renamed
+          # directory or a drifted checkout fails here instead of shipping
+          # evidence naming a revision the suite never saw.
+          git -C .hermes-agent-pinned rev-parse HEAD > hermes-source-sha.txt
+          expected="$(uv run python -c 'from hermes_plugin_kit.testing import DEPLOYED_HERMES_REVISION as r; print(r)')"
+          test "$(cat hermes-source-sha.txt)" = "$expected"
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(git rev-parse HEAD^)" = "$TRIGGER_SHA"
           test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"

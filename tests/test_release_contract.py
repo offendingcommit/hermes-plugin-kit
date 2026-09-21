@@ -796,6 +796,29 @@ class ContractGateShapeTests(unittest.TestCase):
                 test_id, _, fingerprint = entry.partition(" ")
                 self.assertTrue(test_id.strip() and fingerprint.strip())
 
+    def test_no_workflow_references_the_retired_checkout_directory(self) -> None:
+        """`.hermes-agent` was split into per-ref directories.
+
+        A stale reference does not fail the contract suite -- it fails after
+        it, on a directory that no longer exists, which is how a release run
+        died with the suite reporting OK moments earlier.
+        """
+        for name in ("release.yml", "test.yml", "hermes-drift.yml"):
+            workflow = (ROOT / ".github" / "workflows" / name)
+            if not workflow.exists():
+                continue
+            text = workflow.read_text(encoding="utf-8")
+            with self.subTest(workflow=name):
+                self.assertNotIn(
+                    ".hermes-agent ", text,
+                    "the single shared checkout directory was retired; use "
+                    ".hermes-agent-pinned or .hermes-agent-upstream",
+                )
+                self.assertNotRegex(
+                    text, r"\.hermes-agent(?![-\w])",
+                    "reference to the retired shared checkout directory",
+                )
+
     def test_packaging_manifest_covers_every_package_directory(self) -> None:
         """The trap this guards is a subpackage silently dropped from the wheel.
 
