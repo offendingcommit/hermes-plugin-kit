@@ -5,6 +5,7 @@ import json
 import subprocess
 import tarfile
 import tempfile
+import re
 import unittest
 import zipfile
 from pathlib import Path
@@ -436,6 +437,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         cls.workflow = (ROOT / ".github/workflows/release.yml").read_text(
             encoding="utf-8"
         )
+        cls.drift_workflow = (ROOT / ".github/workflows/hermes-drift.yml").read_text(
+            encoding="utf-8"
+        )
         cls.test_workflow = (ROOT / ".github/workflows/test.yml").read_text(
             encoding="utf-8"
         )
@@ -653,6 +657,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         workflows = {
             "release": self.workflow,
             "test": self.test_workflow,
+            "hermes-drift": self.drift_workflow,
         }
         for workflow_name, workflow in workflows.items():
             config = yaml.load(workflow, Loader=yaml.BaseLoader)
@@ -695,3 +700,100 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ContractGateShapeTests(unittest.TestCase):
+    """Hold the gate shape that makes a green run mean something.
+
+    Each of these guards a property that, if it regressed, would leave the
+    workflow passing while checking less than it claims.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.test_workflow = (ROOT / ".github/workflows/test.yml").read_text(encoding="utf-8")
+        cls.drift_workflow = (
+            ROOT / ".github/workflows/hermes-drift.yml"
+        ).read_text(encoding="utf-8")
+        cls.test_config = yaml.load(cls.test_workflow, Loader=yaml.BaseLoader)
+        cls.drift_config = yaml.load(cls.drift_workflow, Loader=yaml.BaseLoader)
+
+    def _steps(self, config, job):
+        return config["jobs"][job].get("steps", [])
+
+    def test_blocking_job_runs_the_full_contract_suite(self) -> None:
+        run = "\n".join(
+            step.get("run", "") for step in self._steps(self.test_config, "hermes-deployed-contract")
+        )
+        self.assertIn("just test-contract-pinned", run)
+        self.assertNotIn(
+            "just test-context-engine-contract", run,
+            "the blocking gate must run the whole contract, not the context-engine module alone",
+        )
+
+    def test_workflow_pin_agrees_with_the_harness_constant(self) -> None:
+        # The workflow cannot read the constant -- actions/checkout consumes the
+        # ref before Python exists -- so the two are kept honest by this test.
+        from hermes_plugin_kit.testing import DEPLOYED_HERMES_REVISION
+
+        pins = set(re.findall(r"\b[0-9a-f]{40}\b", self.test_workflow)) - set(
+            re.findall(r"uses: [^@]+@([0-9a-f]{40})", self.test_workflow)
+        )
+        self.assertEqual(
+            {DEPLOYED_HERMES_REVISION}, pins,
+            "test.yml must name exactly one Hermes pin, equal to the harness constant",
+        )
+
+    def test_drift_workflow_is_scheduled_and_manually_dispatchable(self) -> None:
+        triggers = self.drift_config[True] if True in self.drift_config else self.drift_config["on"]
+        self.assertIn("schedule", triggers)
+        self.assertIn("workflow_dispatch", triggers)
+        self.assertIn(
+            "push", triggers,
+            "a schedule-only workflow is disabled after 60 days of inactivity on a "
+            "public repo; an activity trigger keeps the alarm alive",
+        )
+
+    def test_drift_job_is_not_silenced_at_the_job_level(self) -> None:
+        for name, job in self.drift_config["jobs"].items():
+            with self.subTest(job=name):
+                self.assertNotIn(
+                    "continue-on-error", job,
+                    "job-level continue-on-error renders a failed job green in the "
+                    "checks list; this lane stays non-blocking by not being required",
+                )
+
+    def test_drift_reporting_survives_a_failing_contract_step(self) -> None:
+        steps = self._steps(self.drift_config, "upstream-contract")
+        reporting = [s for s in steps if "classify_drift.py" in s.get("run", "")]
+        self.assertTrue(reporting, "the drift lane must classify and report its failures")
+        for step in reporting:
+            with self.subTest(step=step.get("name")):
+                self.assertEqual(
+                    "always()", step.get("if"),
+                    "without this the reporting step is skipped by the very failure "
+                    "it exists to report",
+                )
+
+    def test_known_drift_baseline_exists_and_is_parseable(self) -> None:
+        baseline = ROOT / "tests/fixtures/known-hermes-drift.txt"
+        self.assertTrue(baseline.exists(), "the baseline is what keeps known red from hiding new red")
+        entries = [
+            line for line in baseline.read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        self.assertTrue(entries, "an empty baseline classifies every known failure as new")
+        for entry in entries:
+            with self.subTest(entry=entry):
+                test_id, _, fingerprint = entry.partition(" ")
+                self.assertTrue(test_id.strip() and fingerprint.strip())
+
+    def test_built_wheel_contains_the_harness_module(self) -> None:
+        # `twine check` reads metadata and never opens the archive, so it passes
+        # on a wheel missing a module entirely. Proven by probe during U4.
+        wheels = sorted((ROOT / "dist").glob("*.whl")) if (ROOT / "dist").exists() else []
+        if not wheels:
+            self.skipTest("no built wheel in dist/; `just build` first")
+        with zipfile.ZipFile(wheels[-1]) as archive:
+            names = archive.namelist()
+        self.assertIn("hermes_plugin_kit/testing.py", names)
