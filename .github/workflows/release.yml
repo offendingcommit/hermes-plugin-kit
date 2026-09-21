@@ -289,7 +289,14 @@ jobs:
           test "$(git rev-parse HEAD^)" = "$TRIGGER_SHA"
           test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-      - name: Prove the exact SHA against mutable upstream Hermes
+      # Gate the release on the revision this kit claims to support, not on
+      # whatever upstream happens to be today. A release promises conformance
+      # at the deployed pin; upstream drift is the scheduled hermes-drift
+      # lane's job, and gating here on a moving target means an upstream break
+      # we have deliberately scoped out blocks every release. That is not
+      # hypothetical: #99220 landed 2026-09-08 and silently blocked this lane
+      # until the next release run two weeks later.
+      - name: Prove the exact SHA against the deployed Hermes pin
         env:
           RELEASE_SHA: ${{ needs.materialize.outputs.release_sha }}
           TAG: ${{ needs.materialize.outputs.tag }}
@@ -297,7 +304,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          just test-contract
+          just test-contract-pinned
           git -C .hermes-agent rev-parse HEAD > hermes-source-sha.txt
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(git rev-parse HEAD^)" = "$TRIGGER_SHA"
