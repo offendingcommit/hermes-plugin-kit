@@ -29,19 +29,25 @@ Nothing here imports hermes-agent or a test framework at module import time.
 from __future__ import annotations
 
 import inspect
+import os
+import subprocess
+import sys
+from pathlib import Path
 from dataclasses import dataclass, field
 from types import SimpleNamespace
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 __all__ = [
     "DEPLOYED_HERMES_REVISION",
     "RECEIPT_FIELD_ORDER",
     "CheckResult",
+    "ResolvedHost",
     "Drift",
     "DriftReport",
     "RecordingPluginContext",
     "check_registration",
     "receipt_fields",
+    "resolve_hermes_checkout",
 ]
 
 #: Receipt fields in the order ``log_registration_summary`` emits them.
@@ -531,3 +537,157 @@ def check_registration(ctx: RecordingPluginContext) -> CheckResult:
         problems.extend(_schema_problems(tool.get("name"), tool.get("schema")))
 
     return CheckResult(tuple(problems))
+
+
+#: How long a fetch may run before it is abandoned, in seconds.
+#:
+#: A test-support library must not hang a consumer's suite. When this elapses
+#: the result is an ordinary unavailable :class:`ResolvedHost`, not an exception.
+FETCH_TIMEOUT_SECONDS = 300
+
+_HERMES_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
+
+
+@dataclass(frozen=True)
+class ResolvedHost:
+    """Where a Hermes checkout is, or why there isn't one.
+
+    ``available`` false is a normal outcome, not an error: offline, sandboxed,
+    and air-gapped runs all land here, and the caller turns it into the
+    "unchecked" drift report rather than a failure.
+    """
+
+    path: Path | None
+    revision: str | None
+    detail: str
+
+    @property
+    def available(self) -> bool:
+        return self.path is not None
+
+    def plugin_context_class(self) -> type | None:
+        """Import the real ``PluginContext`` from this checkout, or ``None``.
+
+        Returns ``None`` when no checkout resolved, which is exactly what
+        :meth:`RecordingPluginContext.check_against_host` treats as unchecked --
+        so a consumer can pass this straight through.
+        """
+        if self.path is None:
+            return None
+        root = str(self.path)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        try:
+            from hermes_cli.plugins import PluginContext  # type: ignore
+        except Exception:  # pragma: no cover - depends on the checkout's shape
+            return None
+        return PluginContext
+
+
+def _git(args: list[str], *, cwd: Path | None = None, timeout: int) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=None if cwd is None else str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _head_revision(path: Path, *, timeout: int) -> str | None:
+    try:
+        return _git(["rev-parse", "HEAD"], cwd=path, timeout=timeout)
+    except Exception:
+        return None
+
+
+def _looks_like_hermes(path: Path) -> bool:
+    return (path / "hermes_cli" / "plugins.py").exists()
+
+
+def _default_fetcher(url: str, revision: str, destination: Path, *, timeout: int) -> None:
+    """Fetch exactly one revision, shallow, into ``destination``."""
+    destination.mkdir(parents=True, exist_ok=True)
+    _git(["init", "-q", str(destination)], timeout=timeout)
+    _git(["remote", "add", "origin", url], cwd=destination, timeout=timeout)
+    _git(["fetch", "-q", "--depth", "1", "origin", revision], cwd=destination, timeout=timeout)
+    _git(["checkout", "-q", "FETCH_HEAD"], cwd=destination, timeout=timeout)
+
+
+def resolve_hermes_checkout(
+    *,
+    revision: str = DEPLOYED_HERMES_REVISION,
+    cache_dir: Path | str | None = None,
+    env: Mapping[str, str] | None = None,
+    timeout: int = FETCH_TIMEOUT_SECONDS,
+    fetcher: Callable[..., None] | None = None,
+    url: str = _HERMES_REPO_URL,
+) -> ResolvedHost:
+    """Find a Hermes checkout the drift replay can use, fetching one if needed.
+
+    Without this the replay only ever runs inside this repository: a consumer's
+    machine has no Hermes checkout, so recording always happens and checking
+    never does.
+
+    Resolution order, and why:
+
+    1. ``HERMES_AGENT_PATH`` always wins. An operator who pointed at a checkout
+       meant it, and a library should not second-guess that or fetch over it.
+    2. A cache already at ``revision`` is reused, so the fetch happens at most
+       once per machine.
+    3. Otherwise fetch. A cache sitting at some *other* revision is never
+       returned as if it were the pin -- that would receipt the wrong host.
+
+    Any failure returns an unavailable result naming the revision and the
+    reason. It never raises and never hangs past ``timeout``.
+    """
+    environ = os.environ if env is None else env
+    supplied = (environ.get("HERMES_AGENT_PATH") or "").strip()
+    if supplied:
+        path = Path(supplied)
+        if not _looks_like_hermes(path):
+            return ResolvedHost(
+                None, None,
+                f"HERMES_AGENT_PATH={supplied} has no hermes_cli/plugins.py, so it is "
+                f"not a Hermes checkout. Point it at one, or unset it to let the "
+                f"harness fetch {revision}.",
+            )
+        return ResolvedHost(path, _head_revision(path, timeout=timeout), f"supplied: {supplied}")
+
+    cache = Path(cache_dir) if cache_dir is not None else _default_cache_dir()
+    if _looks_like_hermes(cache):
+        head = _head_revision(cache, timeout=timeout)
+        if head == revision:
+            return ResolvedHost(cache, head, f"cached at {revision}")
+
+    fetch = fetcher if fetcher is not None else _default_fetcher
+    try:
+        fetch(url, revision, cache, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return ResolvedHost(
+            None, None,
+            f"fetching hermes-agent at {revision} exceeded {timeout}s and was "
+            f"abandoned; set HERMES_AGENT_PATH to a local checkout to skip the fetch.",
+        )
+    except Exception as exc:
+        return ResolvedHost(
+            None, None,
+            f"could not obtain hermes-agent at {revision}: {exc}. "
+            f"Set HERMES_AGENT_PATH to a local checkout to run the drift check offline.",
+        )
+
+    head = _head_revision(cache, timeout=timeout)
+    if not _looks_like_hermes(cache) or head != revision:
+        return ResolvedHost(
+            None, None,
+            f"fetch completed but the checkout is not at {revision} (found {head}); "
+            f"refusing to report a revision the replay did not actually use.",
+        )
+    return ResolvedHost(cache, head, f"fetched {revision}")
+
+
+def _default_cache_dir() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
+    return Path(base) / "hermes-plugin-kit" / "hermes-agent"
