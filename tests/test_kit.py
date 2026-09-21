@@ -2343,3 +2343,107 @@ class PluginReferenceToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SchemaPathDescriptionParityTests(unittest.TestCase):
+    """The ``schema=`` path must guide the model as well as ``params=`` does.
+
+    A supplied Hermes schema used to reach the model with its bare
+    description: ``_augment_description`` ran only on the ``params=`` path,
+    so a plugin choosing ``schema=`` for an expressive construct such as
+    ``oneOf`` silently gave up the ``Required:``/``Optional:`` guidance and
+    the missing-argument examples. The two were mutually exclusive and
+    nothing said so.
+    """
+
+    BASE = "Write a memory entry."
+
+    def _emit(self, **overrides):
+        schema = {
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "examples": ["hello"]},
+                    "tag": {"type": "string", "examples": ["urgent"]},
+                },
+                "required": ["message"],
+                "oneOf": [{"required": ["message"]}],
+            },
+        }
+        schema["parameters"].update(overrides.pop("parameters", {}))
+        decorated = hpk.tool(
+            toolset="x",
+            name="parity_write_entry",
+            description=overrides.pop("description", self.BASE),
+            schema=schema,
+            **overrides,
+        )(lambda args, **kwargs: {"ok": True})
+        return getattr(decorated, "_hpk_tool_spec")["schema"], decorated
+
+    def test_schema_path_matches_params_path_byte_for_byte(self) -> None:
+        emitted, _ = self._emit()
+        equivalent = hpk.build_schema(
+            "parity_write_entry",
+            self.BASE,
+            {
+                "message": hpk.str_arg("m", required=True, example="hello"),
+                "tag": hpk.str_arg("t", example="urgent"),
+            },
+        )
+        self.assertEqual(emitted["description"], equivalent["description"])
+        self.assertIn("Required: `message` (e.g. 'hello')", emitted["description"])
+        self.assertIn("Optional: `tag` (e.g. 'urgent')", emitted["description"])
+
+    def test_augmenting_preserves_expressive_keywords_and_required(self) -> None:
+        emitted, _ = self._emit()
+        # The whole reason a consumer picks schema= over params=.
+        self.assertEqual(emitted["parameters"]["oneOf"], [{"required": ["message"]}])
+        self.assertEqual(emitted["parameters"]["required"], ["message"])
+
+    def test_required_survives_disabled_validation(self) -> None:
+        emitted, _ = self._emit(validate_required=False)
+        self.assertEqual(emitted["parameters"]["required"], ["message"])
+        self.assertIn("Required: `message`", emitted["description"])
+
+    def test_missing_argument_error_carries_the_schema_example(self) -> None:
+        _, decorated = self._emit()
+        self.assertEqual(
+            json.loads(decorated({}))["error"],
+            "message is required (e.g. 'hello')",
+        )
+
+    def test_a_description_that_already_says_required_is_not_doubled(self) -> None:
+        emitted, _ = self._emit(
+            description="Write an entry. Required: the message body."
+        )
+        self.assertEqual(
+            emitted["description"].count("Required:"),
+            1,
+            "hand-written requirement prose must not gain a contradicting clause",
+        )
+        # The optional clause is independent and still lands.
+        self.assertIn("Optional: `tag` (e.g. 'urgent')", emitted["description"])
+
+    def test_a_schema_with_nothing_to_surface_is_left_alone(self) -> None:
+        emitted, _ = self._emit(
+            parameters={
+                "properties": {"note": {"type": "string"}},
+                "required": [],
+                "oneOf": [{"required": ["note"]}],
+            }
+        )
+        self.assertEqual(emitted["description"], self.BASE)
+
+    def test_scalar_openapi_example_is_not_read(self) -> None:
+        """The host recognizes JSON Schema ``examples``, not scalar ``example``.
+
+        Reading a keyword the host's schema sanitizer does not treat as
+        metadata would surface guidance the model never sees enforced.
+        """
+        emitted, _ = self._emit(
+            parameters={
+                "properties": {"message": {"type": "string", "example": "hello"}},
+                "required": ["message"],
+            }
+        )
+        self.assertEqual(emitted["description"], f"{self.BASE} Required: `message`.")
