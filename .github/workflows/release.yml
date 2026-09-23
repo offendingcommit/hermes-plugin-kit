@@ -48,7 +48,7 @@ jobs:
       version: ${{ steps.identity.outputs.version }}
     steps:
       - name: Check out the triggering main revision
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -62,7 +62,7 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
         run: just release-attach-trigger
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.11"
           enable-cache: true
@@ -155,7 +155,7 @@ jobs:
           sha256sum release-source.bundle > release-source.sha256
       - name: Upload the immutable release source
         if: steps.intent.outputs.released == 'true'
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ steps.identity.outputs.source_artifact_name }}
           path: |
@@ -175,18 +175,12 @@ jobs:
     outputs:
       enabled: ${{ steps.verify.outputs.enabled }}
     steps:
-      - name: Mint a current-repository administration-read token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
-        with:
-          client-id: ${{ vars.SOURCE_PROMOTION_APP_CLIENT_ID }}
-          private-key: ${{ secrets.SOURCE_PROMOTION_APP_PRIVATE_KEY }}
-          permission-administration: read
       - name: Fail closed unless immutable releases are enabled
         id: verify
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.SOURCE_PROMOTION_TOKEN }}
         run: |
+          : "${GH_TOKEN:?SOURCE_PROMOTION_TOKEN must be configured in source-promotion}"
           enabled="$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled')"
           test "$enabled" = "true"
           echo "enabled=true" >> "$GITHUB_OUTPUT"
@@ -199,13 +193,13 @@ jobs:
       contents: read
     steps:
       - name: Check out a fresh trigger workspace
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.sha }}
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.11"
           enable-cache: true
@@ -214,7 +208,7 @@ jobs:
         with:
           just-version: "1.58.0"
       - name: Download the immutable release source
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ needs.materialize.outputs.source_artifact_name }}
       - name: Restore and verify the exact release source
@@ -255,13 +249,13 @@ jobs:
       contents: read
     steps:
       - name: Check out a fresh isolated trigger workspace
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.sha }}
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.11"
           enable-cache: true
@@ -270,7 +264,7 @@ jobs:
         with:
           just-version: "1.58.0"
       - name: Download the immutable release source
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ needs.materialize.outputs.source_artifact_name }}
       - name: Restore and verify the exact release source
@@ -318,7 +312,7 @@ jobs:
           test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
       - name: Upload isolated Hermes evidence only
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: hermes-evidence-${{ needs.materialize.outputs.release_sha }}
           path: hermes-source-sha.txt
@@ -338,13 +332,13 @@ jobs:
       version: ${{ needs.materialize.outputs.version }}
     steps:
       - name: Check out a fresh build workspace
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.sha }}
       - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39  # v8.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           python-version: "3.11"
           enable-cache: true
@@ -353,11 +347,11 @@ jobs:
         with:
           just-version: "1.58.0"
       - name: Download the immutable release source
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ needs.materialize.outputs.source_artifact_name }}
       - name: Download isolated Hermes evidence
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: hermes-evidence-${{ needs.materialize.outputs.release_sha }}
       - name: Restore and verify the exact release source
@@ -417,7 +411,7 @@ jobs:
           sha256sum release-source.bundle release-manifest.json dist/* \
             > release-payload.sha256
       - name: Upload the tested release payload
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ needs.materialize.outputs.artifact_name }}
           path: |
@@ -443,29 +437,23 @@ jobs:
       version: ${{ needs.materialize.outputs.version }}
     steps:
       - name: Check out the guarded parent revision without credentials
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ github.sha }}
-      - name: Mint the dedicated source-promotion token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
-        with:
-          client-id: ${{ vars.SOURCE_PROMOTION_APP_CLIENT_ID }}
-          private-key: ${{ secrets.SOURCE_PROMOTION_APP_PRIVATE_KEY }}
-          permission-contents: write
       - name: Download the tested release payload
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ needs.materialize.outputs.artifact_name }}
       - name: Validate and atomically push only the tested source
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.SOURCE_PROMOTION_TOKEN }}
           RELEASE_SHA: ${{ needs.materialize.outputs.release_sha }}
           TAG: ${{ needs.materialize.outputs.tag }}
           TRIGGER_SHA: ${{ github.sha }}
         run: |
+          : "${GH_TOKEN:?SOURCE_PROMOTION_TOKEN must be configured in source-promotion}"
           sha256sum --check release-payload.sha256
           git bundle verify release-source.bundle
           git fetch release-source.bundle \
@@ -513,7 +501,7 @@ jobs:
       id-token: write
     steps:
       - name: Download the tested release payload
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ needs.promote-source.outputs.artifact_name }}
       - name: Recheck the immutable payload before publication
@@ -534,13 +522,13 @@ jobs:
       receipt_artifact_name: ${{ steps.receipt.outputs.artifact_name }}
     steps:
       - name: Check out the published source identity
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ needs.promote-source.outputs.release_sha }}
       - name: Download the published release payload
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ needs.promote-source.outputs.artifact_name }}
       - name: Verify PyPI bytes and finalize the discoverable receipt
@@ -560,7 +548,7 @@ jobs:
             --receipt release-receipt.json
           echo "artifact_name=release-receipt-$RELEASE_SHA" >> "$GITHUB_OUTPUT"
       - name: Upload the finalized discoverable receipt
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ${{ steps.receipt.outputs.artifact_name }}
           path: release-receipt.json
@@ -574,11 +562,11 @@ jobs:
       contents: write
     steps:
       - name: Download the published release payload
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ needs.promote-source.outputs.artifact_name }}
       - name: Download the finalized discoverable receipt
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
           name: ${{ needs.verify-pypi.outputs.receipt_artifact_name }}
           path: final-receipt
