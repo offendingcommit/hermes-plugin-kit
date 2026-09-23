@@ -82,3 +82,13 @@ tests together so consuming Hermes plugins have a reliable migration path.
 Keep `skills/hermes-plugins/references/plugin-kit.md` aligned with public API
 and contract changes so the repo-owned authoring skill does not teach stale
 behavior.
+
+Release authentication uses `SOURCE_PROMOTION_TOKEN` from the main-only
+`source-promotion` environment. A suitable PAT or existing GitHub credential
+is valid; a particular token-minting mechanism is not a release invariant.
+Keep the Administration-read immutability check, tested-source identity,
+atomic guarded push, PyPI OIDC and published-byte verification intact.
+Never expose the promotion credential to source-testing/build jobs, silently
+fall back to the default Actions token, or change branch-policy bypasses as
+part of credential wiring. An environment restriction narrows availability,
+not the underlying token's permissions.

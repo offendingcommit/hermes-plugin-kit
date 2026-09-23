@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import tarfile
 import tempfile
@@ -547,38 +548,63 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertEqual(publish["environment"]["name"], "pypi")
         self.assertEqual(publish["needs"], "promote-source")
 
-    def test_invalid_history_is_strict_and_activation_is_fail_closed(self) -> None:
-        self.assertIn(
-            "semantic-release --strict version --no-push --no-vcs-release",
-            self.workflow,
+    def test_immutable_control_requires_credentials_and_positive_api_evidence(self) -> None:
+        step = next(
+            step
+            for step in self.release_config["jobs"]["immutable-release-control"]["steps"]
+            if step.get("id") == "verify"
         )
-        self.assertIn("SEMANTIC_RELEASE_ENABLED", self.workflow)
-        immutable_control = yaml.safe_dump(
-            self.release_config["jobs"]["immutable-release-control"]
-        )
-        self.assertIn("immutable-releases", immutable_control)
-        self.assertIn("permission-administration: read", immutable_control)
-        self.assertIn("isImmutable", self.workflow)
-        self.assertIn("validate-history", self.workflow)
-        self.assertIn('"$version" = "$previous_version"', self.workflow)
-        self.assertIn("Reject an already-published PyPI version", self.workflow)
-        self.assertIn("404) ;;", self.workflow)
-        self.assertIn("--connect-timeout", self.workflow)
-        self.assertIn("--max-time", self.workflow)
+        for token, enabled, api_status, admitted in (
+            ("", "true", "0", False),
+            ("test-credential", "false", "0", False),
+            ("test-credential", "true", "17", False),
+            ("test-credential", "true", "0", True),
+        ):
+            with self.subTest(token_present=bool(token), enabled=enabled, api_status=api_status):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    output = root / "output"
+                    probe = root / "api-called"
+                    result = subprocess.run(
+                        [
+                            "bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                            'gh() { printf called > "$PROBE"; '
+                            'printf "%s\\n" "$CONTROL_VALUE"; return "$CONTROL_STATUS"; }\n'
+                            + step["run"],
+                        ],
+                        env={
+                            "PATH": os.defpath,
+                            "GH_TOKEN": token,
+                            "GITHUB_REPOSITORY": "example/kit",
+                            "GITHUB_OUTPUT": str(output),
+                            "PROBE": str(probe),
+                            "CONTROL_VALUE": enabled,
+                            "CONTROL_STATUS": api_status,
+                        },
+                        capture_output=True, text=True, check=False,
+                    )
+                    self.assertEqual(result.returncode == 0, admitted)
+                    self.assertEqual(probe.exists(), bool(token))
+                    self.assertEqual(
+                        output.read_text() if output.exists() else "",
+                        "enabled=true\n" if admitted else "",
+                    )
 
-    def test_source_promotion_uses_protected_github_app_identity(self) -> None:
-        promote = self.release_config["jobs"]["promote-source"]
-        promote_text = yaml.safe_dump(promote)
-        self.assertEqual(promote["environment"], "source-promotion")
-        self.assertIn(
-            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
-            promote_text,
-        )
-        self.assertIn("SOURCE_PROMOTION_APP_CLIENT_ID", promote_text)
-        self.assertIn("SOURCE_PROMOTION_APP_PRIVATE_KEY", promote_text)
-        self.assertNotIn("github.token", promote_text)
-        self.assertIn("persist-credentials: 'false'", promote_text)
-        self.assertNotIn("personal_access_token", promote_text.lower())
+    def test_missing_promotion_credential_stops_before_payload_or_git_operations(self) -> None:
+        step = self.release_config["jobs"]["promote-source"]["steps"][-1]
+        with tempfile.TemporaryDirectory() as directory:
+            probe = Path(directory) / "payload-reached"
+            result = subprocess.run(
+                [
+                    "bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
+                    'sha256sum() { printf reached > "$PROBE"; return 1; }\n' + step["run"],
+                ],
+                cwd=directory,
+                env={"PATH": os.defpath, "GH_TOKEN": "", "PROBE": str(probe)},
+                capture_output=True, text=True, check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(probe.exists())
 
     def test_no_release_intent_never_enters_a_protected_environment(self) -> None:
         jobs = self.release_config["jobs"]

@@ -848,7 +848,7 @@ fails closed. Major releases are published but their receipt is always
 
 The workflow first creates the version/CHANGELOG commit and tag locally, then
 bundles that exact final source before executing tests. Fresh, separate jobs
-restore the bundle for unit/public tests, the mutable upstream-Hermes contract,
+restore the bundle for unit/public tests, the pinned Hermes contract,
 and the one artifact build. The build job is gated on both test jobs and never
 checks out or executes Hermes code. Every lane verifies the release SHA, tag,
 parent, and clean tracked source before continuing.
@@ -877,27 +877,34 @@ prerequisites have been reviewed:
   release intent is materialized but before source promotion, and verifies
   `isImmutable` after publication. Non-releasing commits never enter a
   protected environment;
-- a protected environment named exactly `source-promotion` contains variable
-  `SOURCE_PROMOTION_APP_CLIENT_ID` and secret
-  `SOURCE_PROMOTION_APP_PRIVATE_KEY` for a dedicated GitHub App installed only
-  on this repository. The App has repository Administration read and Contents
-  write permissions; no PAT is used;
-- the `main` ruleset requires the ordinary test workflow and names that
-  dedicated GitHub App as its sole source-promotion bypass actor. Generic
-  Actions credentials and the default `GITHUB_TOKEN` must not bypass it;
-- the existing `0.7.0` source baseline has a reviewed immutable `v0.7.0` tag.
+- an environment named exactly `source-promotion`, restricted to the `main`
+  branch, contains secret `SOURCE_PROMOTION_TOKEN`. Use an approved PAT or
+  existing GitHub credential with repository Administration read and Contents
+  write access. The two guarded steps pass it as `GH_TOKEN`; they fail before
+  any operation if it is absent. No App client ID or private key is required;
+- the source-promotion identity is authorized under the repository's branch
+  and tag policies. A PAT does not inherently bypass those policies, and this
+  workflow must not remove protections or grant a generic Actions bypass;
+- the source baseline has its reviewed, matching immutable version tag.
 
-This change does not create or mutate any of those external controls. At review
-time immutable releases were disabled, the required environments/ruleset/App
-were not configured, and the PyPI project did not yet exist; a pending Trusted
-Publisher supports that first OIDC publication. Keep
-`SEMANTIC_RELEASE_ENABLED` unset until the full checklist is configured and a
-generic-token rejection plus dedicated-App promotion have been exercised in an
-isolated validation. A missing switch, control, baseline tag, test, build,
-metadata check, source identity, or artifact hash stops before publication. The
-final release receipt is the discoverable boundary for downstream
-qualification; polling and recovery from a missed notification belong to that
-downstream system.
+Prefer a repository-limited fine-grained PAT. Reusing an operator credential
+retains that credential's existing scopes; the environment restriction limits
+where it is available, not what it can access. Keep it confined to the two
+guarded jobs, never the source-testing/build jobs. Provision it through the
+secure secret-management path, not plaintext files, command-line arguments, or
+workflow logs. Branch rulesets are managed separately; this credential change
+does not create a bypass.
+
+`GH_TOKEN` is a CLI environment variable, not a token type. The default Actions
+`GITHUB_TOKEN` still handles the final GitHub Release, but is not a fallback
+for this Administration-read/source-promotion credential. PyPI publication
+continues to use OIDC, not the GitHub token.
+
+A missing switch, credential, control, baseline tag, test, build, metadata
+check, source identity, or artifact hash stops before publication. The final
+release receipt is the discoverable boundary for downstream qualification;
+source/build success alone is insufficient. Polling and recovery from a
+missed notification belong to that downstream system.
 
 ## License
 
