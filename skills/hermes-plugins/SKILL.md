@@ -102,9 +102,11 @@ report = ctx.check_against_host(host.plugin_context_class())
 assert report.clean, report       # `checked` is False when no host was available
 ```
 
-Requires **hermes-plugin-kit 0.9.0 or newer** — earlier pins have no
-`hermes_plugin_kit.testing` module, and this skill tracks a moving checkout
-while your plugin pins the kit to a commit, so check before you follow this.
+Requires **hermes-plugin-kit 0.9.0 source or newer** — earlier pins have no
+`hermes_plugin_kit.testing` module. The `v0.9.0` tag was not published; choose a
+reviewed private release artifact or an immutable source development pin.
+This skill tracks a moving checkout, not the consumer's installed revision,
+so check the actual dependency before following it.
 
 This is plain Python. Wire it into `make`, `pytest`, `unittest`, or whatever
 the repository already uses; it does not need this kit's task runner.

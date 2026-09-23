@@ -11,8 +11,9 @@ Reachable from an installed kit — name these to a consumer:
 - Exported API and behavior: `hermes_plugin_kit` (the package's own `__all__`)
 - Consumer test support: `hermes_plugin_kit.testing`
 
-Present only in a checkout of this repository. A consumer installing via
-`git+…@sha` gets neither `tests/` nor `skills/`, so do not route them here:
+Present only in a checkout of this repository. A consumer installing the
+private release wheel or `git+…@sha` gets neither `tests/` nor `skills/`, so do
+not route them here:
 
 - Public guide and examples: [`README.md`](../../../README.md)
 - Maintainer rules: [`AGENTS.md`](../../../AGENTS.md)
@@ -80,8 +81,12 @@ making structurally impossible.
 
 1. Prove the current registration and dependency state from code and
    `pyproject.toml`, not README claims.
-2. Add `hermes-plugin-kit` through the consumer's package workflow, then refresh
-   its lockfile with the repo-native install command.
+2. Fetch the kit's private GHCR wheel using the reviewed bundle and receipt
+   digests and an explicitly authorized package-read credential; follow the
+   [installation contract](../../../README.md#install). Supply that verified
+   local wheel through the consumer's package workflow and refresh its
+   lockfile with the repo-native command. An API compatibility range is not
+   a public index source; do not install the kit from PyPI.
 3. Wrap existing handlers without changing business behavior.
 4. Use `register_all` for tool-only migration or `register_plugin` when adopting
    commands, middleware, hooks, or plugin skills.
@@ -106,6 +111,13 @@ the same operations with `@tool` shadows the active-context-aware dispatch.
   can emit duplicate final output.
 - The kit follows the real Hermes contract tests. A fake context alone can hide
   signature drift.
+- Public source does not imply public package access. Wheels, sdists, and
+  receipts belong only in private GHCR, never public GitHub Release assets or
+  public-repository Actions artifacts. Keep the package unlinked with an
+  independent ACL; do not grant the public repository Actions package access.
+- The `v0.9.0` tag is source-only after failed publication. Do not retry its old
+  publisher or assume a package exists; use a reviewed private release or an
+  explicitly pinned source development revision.
 
 ## Validation
 

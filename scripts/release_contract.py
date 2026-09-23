@@ -9,15 +9,12 @@ import json
 import re
 import subprocess
 import tarfile
-import time
 import tomllib
 import zipfile
 from dataclasses import dataclass
 from email.parser import Parser
 from pathlib import Path, PurePosixPath
-from typing import Callable, Iterable, Sequence
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from typing import Iterable, Sequence
 
 
 PACKAGE_NAME = "hermes-plugin-kit"
@@ -26,6 +23,8 @@ SEMVER_PATTERN = re.compile(
     r"^(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)$"
 )
 SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+REGISTRY_REPOSITORY = "ghcr.io/offendingcommit/hermes-plugin-kit"
+DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 class ReleaseContractError(ValueError):
@@ -225,11 +224,19 @@ def _metadata_from_sdist(path: Path) -> tuple[str, str]:
 
 
 def _artifact_records(artifact_dir: Path, version: str) -> list[dict[str, object]]:
+    if artifact_dir.is_symlink():
+        raise ReleaseContractError("artifact directory must not be a symlink")
     artifact_dir = artifact_dir.resolve()
     wheels = sorted(artifact_dir.glob("*.whl"))
     sdists = sorted(artifact_dir.glob("*.tar.gz"))
     if len(wheels) != 1 or len(sdists) != 1:
         raise ReleaseContractError("dist must contain exactly one wheel and one sdist")
+    if {path.name for path in artifact_dir.iterdir()} != {
+        path.name for path in (*wheels, *sdists)
+    }:
+        raise ReleaseContractError("dist contains unexpected files")
+    if {path.name for path in (*wheels, *sdists)} != set(artifact_filenames(version)):
+        raise ReleaseContractError("dist filenames do not match the release version")
 
     records: list[dict[str, object]] = []
     for path, metadata_reader in ((wheels[0], _metadata_from_wheel), (sdists[0], _metadata_from_sdist)):
@@ -253,7 +260,7 @@ def _artifact_records(artifact_dir: Path, version: str) -> list[dict[str, object
 
 
 def _validate_sha(value: str, label: str) -> None:
-    if not SHA_PATTERN.fullmatch(value):
+    if not isinstance(value, str) or not SHA_PATTERN.fullmatch(value):
         raise ReleaseContractError(f"{label} must be a lowercase 40-character Git SHA")
 
 
@@ -270,7 +277,7 @@ def create_release_manifest(
     artifact_dir: Path,
     output_path: Path,
 ) -> dict[str, object]:
-    """Write the prepublication manifest for already-tested distributions."""
+    """Write the schema-2 manifest for already-tested private distributions."""
 
     release_class = _release_class(previous_version, version)
     expected_tag = f"{TAG_PREFIX}{version}"
@@ -288,8 +295,8 @@ def create_release_manifest(
     )
     passed = {"result": "passed", "source_sha": source_sha, "status": "passed"}
     receipt: dict[str, object] = {
-        "schema_version": 1,
-        "receipt_state": "prepublication",
+        "schema_version": 2,
+        "receipt_state": "tested",
         "package": PACKAGE_NAME,
         "previous_version": previous_version,
         "version": version,
@@ -297,7 +304,7 @@ def create_release_manifest(
         "source_sha": source_sha,
         "release_class": release_class,
         "promotion": promotion,
-        "registry_url": f"https://pypi.org/project/{PACKAGE_NAME}/{version}/",
+        "registry_repository": REGISTRY_REPOSITORY,
         "artifacts": _artifact_records(artifact_dir, version),
         "evidence": {
             "unit": {**passed, "command": "just test"},
@@ -307,7 +314,7 @@ def create_release_manifest(
             },
             "hermes_contract": {
                 **passed,
-                "command": "just test-contract",
+                "command": "just test-contract-pinned",
                 "hermes_source_sha": hermes_source_sha,
             },
             "build_metadata": {
@@ -322,6 +329,7 @@ def create_release_manifest(
             },
         },
     }
+    validate_release_identity(receipt, state="tested")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -329,35 +337,74 @@ def create_release_manifest(
     return receipt
 
 
-def verify_release_manifest(receipt_path: Path, artifact_dir: Path) -> dict[str, object]:
-    """Recompute prepublication identity and hashes instead of trusting it."""
+def artifact_filenames(version: str) -> tuple[str, str]:
+    """The project ships exactly one universal wheel and one source archive."""
+
+    SemVer.parse(version)
+    return (
+        f"hermes_plugin_kit-{version}-py3-none-any.whl",
+        f"hermes_plugin_kit-{version}.tar.gz",
+    )
+
+
+def read_json(path: Path) -> dict[str, object]:
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ReleaseContractError(f"duplicate JSON key: {key}")
+            result[key] = value
+        return result
 
     try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ReleaseContractError(f"cannot read release receipt: {error}") from error
-    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
+        value = json.loads(path.read_bytes(), object_pairs_hook=unique_object)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ReleaseContractError(f"cannot read release JSON: {error}") from error
+    if not isinstance(value, dict):
+        raise ReleaseContractError("release JSON must be an object")
+    return value
+
+
+def validate_registry_reference(reference: str) -> str:
+    prefix = f"{REGISTRY_REPOSITORY}@"
+    if not isinstance(reference, str) or not reference.startswith(prefix):
+        raise ReleaseContractError("registry reference must name the private repository")
+    digest = reference[len(prefix):]
+    if not DIGEST_PATTERN.fullmatch(digest):
+        raise ReleaseContractError("registry reference must pin a SHA-256 digest")
+    return digest
+
+
+def validate_release_identity(receipt: dict[str, object], *, state: str) -> None:
+    """Share source, gate, version, and promotion checks across both documents."""
+
+    if receipt.get("schema_version") != 2:
         raise ReleaseContractError("unsupported release receipt schema")
-    if receipt.get("receipt_state") != "prepublication":
-        raise ReleaseContractError("expected a prepublication release manifest")
+    if receipt.get("receipt_state") != state:
+        raise ReleaseContractError(f"expected a {state} release receipt")
     if receipt.get("package") != PACKAGE_NAME:
         raise ReleaseContractError("release receipt package mismatch")
-
-    version = receipt.get("version")
-    previous_version = receipt.get("previous_version")
+    if receipt.get("registry_repository") != REGISTRY_REPOSITORY:
+        raise ReleaseContractError("release receipt registry mismatch")
+    expected_keys = {
+        "schema_version", "receipt_state", "package", "previous_version", "version",
+        "tag", "source_sha", "release_class", "promotion", "registry_repository",
+        "artifacts", "evidence",
+    }
+    if state == "published":
+        expected_keys |= {"registry_reference", "payload"}
+    if set(receipt) != expected_keys:
+        raise ReleaseContractError("release receipt contains unexpected or missing fields")
+    version, previous_version = receipt.get("version"), receipt.get("previous_version")
     source_sha = receipt.get("source_sha")
     if not all(isinstance(value, str) for value in (version, previous_version, source_sha)):
         raise ReleaseContractError("release receipt identity is incomplete")
-    assert isinstance(version, str)
-    assert isinstance(previous_version, str)
-    assert isinstance(source_sha, str)
     _validate_sha(source_sha, "source_sha")
     release_class = _release_class(previous_version, version)
     if receipt.get("tag") != f"{TAG_PREFIX}{version}":
         raise ReleaseContractError("release receipt tag mismatch")
     if receipt.get("release_class") != release_class:
         raise ReleaseContractError("release receipt class mismatch")
-
     expected_promotion = (
         {"automatic_candidate": False, "state": "manual_migration_required"}
         if release_class == "major"
@@ -365,239 +412,107 @@ def verify_release_manifest(receipt_path: Path, artifact_dir: Path) -> dict[str,
     )
     if receipt.get("promotion") != expected_promotion:
         raise ReleaseContractError("release receipt promotion state mismatch")
-
-    expected_artifacts = _artifact_records(artifact_dir, version)
-    actual_artifacts = receipt.get("artifacts")
-    if not isinstance(actual_artifacts, list):
-        raise ReleaseContractError("release receipt artifacts are missing")
-    actual_by_name = {
-        item.get("filename"): item
-        for item in actual_artifacts
-        if isinstance(item, dict) and isinstance(item.get("filename"), str)
-    }
-    for expected in expected_artifacts:
-        actual = actual_by_name.get(expected["filename"])
-        if actual is None:
-            raise ReleaseContractError(f"missing artifact receipt for {expected['filename']}")
-        if actual.get("sha256") != expected["sha256"]:
-            raise ReleaseContractError(f"SHA-256 mismatch for {expected['filename']}")
-        if actual.get("size") != expected["size"]:
-            raise ReleaseContractError(f"size mismatch for {expected['filename']}")
-    if (
-        len(actual_artifacts) != len(expected_artifacts)
-        or len(actual_by_name) != len(expected_artifacts)
-    ):
-        raise ReleaseContractError("release receipt contains unexpected artifacts")
-
     evidence = receipt.get("evidence")
-    if not isinstance(evidence, dict):
-        raise ReleaseContractError("release receipt evidence is missing")
-    for gate in ("unit", "public_contract", "hermes_contract", "build_metadata"):
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "unit", "public_contract", "hermes_contract", "build_metadata", "workflow",
+    }:
+        raise ReleaseContractError("release receipt evidence is incomplete")
+    commands = {
+        "unit": "just test",
+        "public_contract": "just test-release (included in just test)",
+        "hermes_contract": "just test-contract-pinned",
+        "build_metadata": "just build && just check-dist",
+    }
+    for gate, command in commands.items():
         item = evidence.get(gate)
         if (
             not isinstance(item, dict)
             or item.get("status") != "passed"
             or item.get("result") != "passed"
-            or not isinstance(item.get("command"), str)
+            or item.get("command") != command
         ):
             raise ReleaseContractError(f"release receipt gate {gate} did not pass")
         if item.get("source_sha") != source_sha:
             raise ReleaseContractError(f"release receipt gate {gate} used another source")
-    hermes_sha = evidence["hermes_contract"].get("hermes_source_sha")
-    if not isinstance(hermes_sha, str):
-        raise ReleaseContractError("Hermes contract source SHA is missing")
-    _validate_sha(hermes_sha, "hermes_source_sha")
+    _validate_sha(evidence["hermes_contract"].get("hermes_source_sha"), "hermes_source_sha")
+    workflow = evidence.get("workflow")
+    if (
+        not isinstance(workflow, dict)
+        or workflow.get("name") != "release.yml"
+        or not isinstance(workflow.get("run_id"), str)
+        or not re.fullmatch(r"[1-9][0-9]*", workflow["run_id"])
+        or type(workflow.get("run_attempt")) is not int
+        or workflow["run_attempt"] < 1
+        or workflow.get("source_sha") != source_sha
+    ):
+        raise ReleaseContractError("workflow run evidence is incomplete or used another source")
+    artifacts = receipt.get("artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 2:
+        raise ReleaseContractError("release receipt must name one wheel and one sdist")
+    filenames = set()
+    for artifact in artifacts:
+        _validate_file_record(artifact, name_key="filename", published=state == "published")
+        filenames.add(artifact["filename"])
+    if filenames != set(artifact_filenames(version)):
+        raise ReleaseContractError("release receipt artifact filenames mismatch")
+
+
+def _validate_file_record(record, *, name_key: str, published: bool) -> None:
+    expected_keys = {name_key, "sha256", "size"}
+    if published:
+        expected_keys.add("blob_digest")
+    if (
+        not isinstance(record, dict)
+        or set(record) != expected_keys
+        or not isinstance(record.get(name_key), str)
+        or not isinstance(record.get("sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
+        or type(record.get("size")) is not int
+        or record["size"] < 1
+    ):
+        raise ReleaseContractError("release file identity is incomplete")
+    if published and record["blob_digest"] != f"sha256:{record['sha256']}":
+        raise ReleaseContractError("release file blob digest mismatch")
+
+
+def verify_release_manifest(receipt_path: Path, artifact_dir: Path) -> dict[str, object]:
+    """Recompute the tested artifact metadata and bytes instead of trusting it."""
+
+    receipt = read_json(receipt_path)
+    validate_release_identity(receipt, state="tested")
+    expected_artifacts = _artifact_records(artifact_dir, receipt["version"])
+    actual_by_name = {item["filename"]: item for item in receipt["artifacts"]}
+    for expected in expected_artifacts:
+        actual = actual_by_name[expected["filename"]]
+        if actual["sha256"] != expected["sha256"]:
+            raise ReleaseContractError(f"SHA-256 mismatch for {expected['filename']}")
+        if actual["size"] != expected["size"]:
+            raise ReleaseContractError(f"size mismatch for {expected['filename']}")
     return receipt
 
 
-def _fetch_json(url: str) -> dict[str, object]:
-    request = Request(url, headers={"User-Agent": "hermes-plugin-kit-release-verifier/1"})
-    with urlopen(request, timeout=30) as response:
-        value = json.load(response)
-    if not isinstance(value, dict):
-        raise ReleaseContractError("PyPI returned a non-object release response")
-    return value
-
-
-def _fetch_bytes(url: str) -> bytes:
-    request = Request(url, headers={"User-Agent": "hermes-plugin-kit-release-verifier/1"})
-    with urlopen(request, timeout=60) as response:
-        return response.read()
-
-
-def verify_pypi_release(
-    receipt_path: Path,
-    *,
-    fetch_json: Callable[[str], dict[str, object]] = _fetch_json,
-    fetch_bytes: Callable[[str], bytes] = _fetch_bytes,
-) -> dict[str, object]:
-    """Verify PyPI exposes the exact receipt filenames and bytes."""
-
-    try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ReleaseContractError(f"cannot read release receipt: {error}") from error
-    if not isinstance(receipt, dict):
-        raise ReleaseContractError("release receipt must be an object")
-    version = receipt.get("version")
-    artifacts = receipt.get("artifacts")
-    if not isinstance(version, str) or not isinstance(artifacts, list):
-        raise ReleaseContractError("release receipt identity is incomplete")
-    SemVer.parse(version)
-    expected = {
-        item["filename"]: item
-        for item in artifacts
-        if isinstance(item, dict)
-        and isinstance(item.get("filename"), str)
-        and isinstance(item.get("sha256"), str)
-        and isinstance(item.get("size"), int)
-    }
-    if len(expected) != 2:
-        raise ReleaseContractError("release receipt must name one wheel and one sdist")
-
-    metadata_url = f"https://pypi.org/pypi/{PACKAGE_NAME}/{version}/json"
-    try:
-        metadata = fetch_json(metadata_url)
-    except Exception as error:
-        raise ReleaseContractError(f"cannot fetch PyPI release metadata: {error}") from error
-    info = metadata.get("info")
-    urls = metadata.get("urls")
-    if not isinstance(info, dict) or info.get("version") != version:
-        raise ReleaseContractError("PyPI release version does not match the receipt")
-    if not isinstance(urls, list):
-        raise ReleaseContractError("PyPI release file inventory is missing")
-    published = {
-        item.get("filename"): item
-        for item in urls
-        if isinstance(item, dict) and isinstance(item.get("filename"), str)
-    }
-    if (
-        len(published) != len(urls)
-        or len(published) != len(expected)
-        or set(published) != set(expected)
-    ):
-        raise ReleaseContractError("PyPI filenames do not match the release receipt")
-
-    for filename, expected_artifact in expected.items():
-        expected_sha = expected_artifact["sha256"]
-        item = published[filename]
-        digests = item.get("digests")
-        url = item.get("url")
-        if item.get("yanked") is True:
-            raise ReleaseContractError(f"PyPI artifact is yanked: {filename}")
-        if not isinstance(digests, dict) or digests.get("sha256") != expected_sha:
-            raise ReleaseContractError(f"PyPI SHA-256 mismatch for {filename}")
-        if not isinstance(url, str):
-            raise ReleaseContractError(f"PyPI artifact URL is missing for {filename}")
-        parsed_url = urlparse(url)
-        if parsed_url.scheme != "https" or parsed_url.hostname != "files.pythonhosted.org":
-            raise ReleaseContractError(f"unexpected PyPI artifact URL for {filename}")
-        try:
-            published_bytes = fetch_bytes(url)
-        except Exception as error:
-            raise ReleaseContractError(f"cannot download PyPI artifact {filename}: {error}") from error
-        if hashlib.sha256(published_bytes).hexdigest() != expected_sha:
-            raise ReleaseContractError(f"downloaded PyPI SHA-256 mismatch for {filename}")
-        if len(published_bytes) != expected_artifact["size"]:
-            raise ReleaseContractError(f"downloaded PyPI size mismatch for {filename}")
-    return metadata
-
-
-def finalize_release_receipt(
-    manifest_path: Path,
-    output_path: Path,
-    *,
-    fetch_json: Callable[[str], dict[str, object]] = _fetch_json,
-    fetch_bytes: Callable[[str], bytes] = _fetch_bytes,
-) -> dict[str, object]:
-    """Verify PyPI and persist its direct immutable URLs in the final receipt."""
-
-    metadata = verify_pypi_release(
-        manifest_path,
-        fetch_json=fetch_json,
-        fetch_bytes=fetch_bytes,
-    )
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ReleaseContractError(f"cannot read release manifest: {error}") from error
-    if not isinstance(manifest, dict) or manifest.get("receipt_state") != "prepublication":
-        raise ReleaseContractError("expected a prepublication release manifest")
-
-    urls = metadata.get("urls")
-    assert isinstance(urls, list)
-    published = {
-        item["filename"]: item["url"]
-        for item in urls
-        if isinstance(item, dict)
-        and isinstance(item.get("filename"), str)
-        and isinstance(item.get("url"), str)
-    }
-    receipt = json.loads(json.dumps(manifest))
-    receipt["receipt_state"] = "published"
-    for artifact in receipt["artifacts"]:
-        artifact["url"] = published[artifact["filename"]]
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    return verify_final_release_receipt(output_path)
-
-
 def verify_final_release_receipt(receipt_path: Path) -> dict[str, object]:
-    """Validate the offline shape of a finalized, discoverable receipt."""
+    """Validate a schema-2 private OCI receipt without network access."""
 
-    try:
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ReleaseContractError(f"cannot read final release receipt: {error}") from error
-    if not isinstance(receipt, dict) or receipt.get("schema_version") != 1:
-        raise ReleaseContractError("unsupported final release receipt schema")
-    if receipt.get("receipt_state") != "published":
-        raise ReleaseContractError("final release receipt is not published")
-    if receipt.get("package") != PACKAGE_NAME:
-        raise ReleaseContractError("final release receipt package mismatch")
-    version = receipt.get("version")
-    source_sha = receipt.get("source_sha")
-    artifacts = receipt.get("artifacts")
-    if not isinstance(version, str) or not isinstance(source_sha, str):
-        raise ReleaseContractError("final release receipt identity is incomplete")
-    SemVer.parse(version)
-    _validate_sha(source_sha, "source_sha")
-    if receipt.get("tag") != f"{TAG_PREFIX}{version}":
-        raise ReleaseContractError("final release receipt tag mismatch")
-    if not isinstance(artifacts, list) or len(artifacts) != 2:
-        raise ReleaseContractError("final release receipt must name one wheel and one sdist")
-
-    filenames: set[str] = set()
-    for artifact in artifacts:
-        if not isinstance(artifact, dict):
-            raise ReleaseContractError("final release artifact record must be an object")
-        filename = artifact.get("filename")
-        sha256 = artifact.get("sha256")
-        size = artifact.get("size")
-        url = artifact.get("url")
-        if (
-            not isinstance(filename, str)
-            or not re.fullmatch(r"[A-Za-z0-9_.+-]+", filename)
-            or not isinstance(sha256, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", sha256)
-            or not isinstance(size, int)
-            or size < 1
-            or not isinstance(url, str)
-        ):
-            raise ReleaseContractError("final release artifact identity is incomplete")
-        parsed_url = urlparse(url)
-        if parsed_url.scheme != "https" or parsed_url.hostname != "files.pythonhosted.org":
-            raise ReleaseContractError(f"unexpected PyPI artifact URL for {filename}")
-        filenames.add(filename)
-    if len(filenames) != len(artifacts):
-        raise ReleaseContractError("final release receipt contains duplicate artifacts")
-    if sum(filename.endswith(".whl") for filename in filenames) != 1 or sum(
-        filename.endswith(".tar.gz") for filename in filenames
-    ) != 1:
-        raise ReleaseContractError("final release receipt must name one wheel and one sdist")
+    receipt = read_json(receipt_path)
+    validate_release_identity(receipt, state="published")
+    validate_registry_reference(receipt.get("registry_reference"))
+    payload = receipt.get("payload")
+    expected_paths = {
+        "release-manifest.json", "release-source.bundle", "release-payload.sha256",
+        *(f"dist/{name}" for name in artifact_filenames(receipt["version"])),
+    }
+    if not isinstance(payload, list) or len(payload) != len(expected_paths):
+        raise ReleaseContractError("final release payload inventory is incomplete")
+    for item in payload:
+        _validate_file_record(item, name_key="path", published=True)
+    by_path = {item["path"]: item for item in payload}
+    if set(by_path) != expected_paths:
+        raise ReleaseContractError("final release payload paths mismatch")
+    for artifact in receipt["artifacts"]:
+        item = by_path[f"dist/{artifact['filename']}"]
+        if any(item[key] != artifact[key] for key in ("sha256", "size", "blob_digest")):
+            raise ReleaseContractError("final release artifact and payload disagree")
     return receipt
 
 
@@ -627,17 +542,6 @@ def _parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify-manifest")
     verify.add_argument("--receipt", required=True, type=Path)
     verify.add_argument("--artifact-dir", required=True, type=Path)
-
-    pypi = subparsers.add_parser("verify-pypi")
-    pypi.add_argument("--receipt", required=True, type=Path)
-    pypi.add_argument("--attempts", type=int, default=12)
-    pypi.add_argument("--delay-seconds", type=int, default=10)
-
-    finalize = subparsers.add_parser("finalize-receipt")
-    finalize.add_argument("--manifest", required=True, type=Path)
-    finalize.add_argument("--output", required=True, type=Path)
-    finalize.add_argument("--attempts", type=int, default=12)
-    finalize.add_argument("--delay-seconds", type=int, default=10)
 
     final = subparsers.add_parser("verify-final-receipt")
     final.add_argument("--receipt", required=True, type=Path)
@@ -676,19 +580,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "verify-final-receipt":
         verify_final_release_receipt(args.receipt)
         return 0
-    if args.attempts < 1 or args.delay_seconds < 0:
-        raise ReleaseContractError("PyPI retry settings must be non-negative")
-    for attempt in range(1, args.attempts + 1):
-        try:
-            if args.command == "finalize-receipt":
-                finalize_release_receipt(args.manifest, args.output)
-            else:
-                verify_pypi_release(args.receipt)
-            return 0
-        except ReleaseContractError:
-            if attempt == args.attempts:
-                raise
-            time.sleep(args.delay_seconds)
     return 0
 
 

@@ -34,9 +34,11 @@ plugin.
   deployment configuration; explicit-name selection remains mutually exclusive
   for narrow legacy surfaces. Registration preflight must finish before the
   first `ctx.register_*` mutation, and receipts must name selected capabilities.
-- Consumer plugins must pin this package to an immutable commit, not a moving
-  branch. Profiles that install multiple plugins into one Python environment
-  must keep every consumer on the same kit revision.
+- Consumer deployments must pin this package's private OCI bundle/receipt
+  digests and verified wheel SHA-256, never a moving branch or registry tag.
+  Source-based development pins an immutable commit. Profiles that install
+  multiple plugins into one Python environment must use one qualified kit
+  revision for every consumer.
 - Use `invoke_host_tool` for host-managed capabilities such as `send_message`;
   do not assume every Hermes capability is registered in `tools.registry`.
   Nested host calls must remain visible to `pre_tool_call` and `post_tool_call`.
@@ -83,12 +85,40 @@ Keep `skills/hermes-plugins/references/plugin-kit.md` aligned with public API
 and contract changes so the repo-owned authoring skill does not teach stale
 behavior.
 
-Release authentication uses `SOURCE_PROMOTION_TOKEN` from the main-only
+The source repository stays public; release wheels, sdists, and receipts stay
+private in `ghcr.io/offendingcommit/hermes-plugin-kit`. Source visibility never
+authorizes public artifact publication. Public-repository Actions artifacts
+are not private distribution: upload only public source/test evidence there.
+GitHub Releases are immutable metadata only, with private digest references
+and zero assets, including receipts.
+
+Package privacy is independent of source access. Keep the GHCR package
+unlinked, with its own explicit ACL; never grant this public repository Actions
+access or add `org.opencontainers.image.source`. Do not use the built-in
+`GITHUB_TOKEN` for package access: associating a private package with a public
+repository can expose it to fork workflows. Registry steps use step-scoped
+`GH_TOKEN` from protected environment secret `PRIVATE_ARTIFACTS_TOKEN`; writers
+use the main-only `private-artifacts` environment, and source-promotion fetch
+uses a read-capable secret in its own main-only environment.
+
+Require a positive package API `visibility=private` check before any sensitive
+upload. An absent package may receive metadata-only bootstrap content, then
+must be rechecked. API errors and public/internal visibility fail closed.
+Use ORAS with stdin/temporary authentication; preserve deterministic OCI
+identities, digest-pinned retrieval, exact tested bytes, both test gates,
+metadata checks, and downloaded-byte verification. Discovery tags cannot
+replace digest identity; retries must refuse conflicting existing tags.
+
+Source authentication uses `SOURCE_PROMOTION_TOKEN` from the main-only
 `source-promotion` environment. A suitable PAT or existing GitHub credential
 is valid; a particular token-minting mechanism is not a release invariant.
 Keep the Administration-read immutability check, tested-source identity,
-atomic guarded push, PyPI OIDC and published-byte verification intact.
-Never expose the promotion credential to source-testing/build jobs, silently
-fall back to the default Actions token, or change branch-policy bypasses as
-part of credential wiring. An environment restriction narrows availability,
-not the underlying token's permissions.
+atomic guarded push, and immutable metadata-only GitHub Release control intact.
+Never expose the promotion credential to source-testing/build or registry
+steps, silently fall back to the default Actions token, or change branch-policy
+bypasses as part of credential wiring. Environment restrictions narrow token
+availability, not underlying permissions.
+
+Keep `SEMANTIC_RELEASE_ENABLED=false` until the private cutover is reviewed.
+The tagged `v0.9.0` publication failed before publishing: never retag, rebuild,
+or retry its old PyPI workflow. The next reviewed normal release is the cutover.
