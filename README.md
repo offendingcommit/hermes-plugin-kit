@@ -3,7 +3,6 @@
 > Lifecycle helpers for [hermes-agent](https://github.com/NousResearch/hermes-agent) plugins — convention-correct commands, tools, middleware, hooks, skills, validation, and safe logging, baked in.
 
 [![test](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml/badge.svg)](https://github.com/offendingcommit/hermes-plugin-kit/actions/workflows/test.yml)
-[![PyPI](https://img.shields.io/pypi/v/hermes-plugin-kit)](https://pypi.org/project/hermes-plugin-kit/)
 ![python](https://img.shields.io/badge/python-3.11%2B-blue)
 
 `hermes-plugin-kit` is a tiny, dependency-free helper for authoring plugins for
@@ -81,18 +80,59 @@ and adds nothing to your runtime footprint — pure standard library.
 
 ## Install
 
-Install a published release from PyPI with [uv](https://docs.astral.sh/uv/) or pip:
+The source repository is public; release wheels, sdists, and receipts are
+**private GHCR artifacts** at `ghcr.io/offendingcommit/hermes-plugin-kit`.
+Public source visibility does not grant package access. This package is not
+distributed through PyPI, and installing or releasing it needs no PyPI account.
+The `v0.9.0` source tag exists but its publication failed; do not treat that tag
+as an available package. The next reviewed normal release is the private
+artifact cutover.
+
+Use a reviewed checkout of this repository for the fetch/verification scripts,
+Python 3.11+, [GitHub CLI](https://cli.github.com/), [ORAS 1.3.4](https://oras.land/),
+and [uv](https://docs.astral.sh/uv/). An administrator must grant your identity
+read access in the package's independent ACL. Load a classic GitHub PAT with
+`read:packages` into `GH_TOKEN` through your secret manager (and authorize SSO
+where required). Do not grant this public repository Actions access or link
+the package to it: that can expose package access to fork workflows. A public
+repository's built-in `GITHUB_TOKEN` is not the package credential.
+
+Copy the **bundle and receipt digest references** from the reviewed immutable
+GitHub Release body into `BUNDLE_REFERENCE` and `RECEIPT_REFERENCE`. Both must
+have the form `ghcr.io/offendingcommit/hermes-plugin-kit@sha256:<64 hex digits>`;
+the `vVERSION` and `vVERSION-receipt` tags are discovery aids, never install pins.
+Then, from that checkout:
 
 ```bash
-uv add "hermes-plugin-kit>=0.7,<1"
-# or: pip install "hermes-plugin-kit>=0.7,<1"
+: "${GH_TOKEN:?Load your package-read credential through your secret manager}"
+: "${BUNDLE_REFERENCE:?Set the reviewed immutable bundle reference}"
+: "${RECEIPT_REFERENCE:?Set the reviewed immutable receipt reference}"
+python scripts/private_release.py fetch \
+  --reference "$RECEIPT_REFERENCE" --output-dir private-receipt
+python scripts/release_contract.py verify-final-receipt \
+  --receipt private-receipt/release-receipt.json
+test "$(python -c 'import json; print(json.load(open("private-receipt/release-receipt.json"))["registry_reference"])')" = "$BUNDLE_REFERENCE"
+python scripts/private_release.py fetch \
+  --reference "$BUNDLE_REFERENCE" --output-dir private-release
+uv venv .venv
+uv pip install --python .venv/bin/python private-release/dist/*.whl
 ```
+
+Fetch authenticates through ORAS using stdin and temporary credential storage;
+it verifies the requested manifest digest, every blob size/hash, safe payload
+paths, source identity, and manifest/checksum agreement before exposing files.
+Receipt verification and the reference equality check bind the install to the
+reviewed publication. Keep the downloaded payload private; do not mirror it
+into public Actions artifacts or GitHub Release assets. PyPI may still provide
+third-party dependencies such as PyYAML, never this kit's release artifacts.
 
 Consumers declare the narrowest truthful compatibility range in
 `pyproject.toml`; adopting a newer kit API and raising that lower bound are one
-change. Repository locks remain exact for reproducible local tests. Fleet
-deployment independently selects one qualified wheel filename and SHA-256 for
-every co-loaded plugin, so a movable branch is never a deployment identity.
+change. The range describes API compatibility, not a public index source.
+Supply the verified local wheel through the consumer's package workflow and
+keep locks exact. Fleet deployment pins the private bundle/receipt digests and
+one qualified wheel filename/SHA-256 for every co-loaded plugin; a movable
+branch or registry tag is never a deployment identity.
 
 ```toml
 dependencies = ["hermes-plugin-kit>=0.7,<1"]
@@ -854,57 +894,102 @@ checks out or executes Hermes code. Every lane verifies the release SHA, tag,
 parent, and clean tracked source before continuing.
 
 The build produces the wheel and sdist once, validates their metadata, and
-writes a prepublication manifest containing their filenames, sizes, and SHA-256
-values. Only then may the protected source-promotion job atomically push that
-tested commit and tag. A separate `pypi` environment publishes the uploaded
-artifacts through OIDC Trusted Publishing; no password or API token is used.
-After publication, the workflow downloads and hashes the registry files and
-turns the manifest into the final receipt by adding each verified direct
-`https://files.pythonhosted.org/` URL. The immutable GitHub Release uploads that
-final receipt only after PyPI verification. A failed publish is retried from
-the retained workflow artifact and must not rebuild it.
+writes a tested manifest with filenames, sizes, SHA-256 values, source identity,
+and both test gates' evidence. It constructs a deterministic OCI layout
+containing those exact distributions, manifest, source bundle, and payload
+checksums. Before sensitive bytes leave the runner, the package API must
+positively report `visibility=private`. An absent package can be bootstrapped
+with metadata only, then must pass that same check; API failure, `public`, or
+`internal` visibility fails closed. The package remains unlinked to the public
+source repository, with no Actions-access grant or inherited repository ACL.
 
-Release automation is deliberately disarmed unless the repository variable
-`SEMANTIC_RELEASE_ENABLED` is exactly `true`. Set it only after all activation
-prerequisites have been reviewed:
+The main-only `private-artifacts` environment stages the layout with ORAS,
+downloads it by manifest digest, and verifies all bytes. Only then may the
+separate main-only `source-promotion` job fetch that digest and atomically push
+the exact tested commit and tag using its own promotion credential.
+`publish-private` binds `vVERSION` to the **same staged manifest digest**,
+refusing any existing tag with a different digest. It re-fetches the registry
+bytes, finalizes a schema-2 receipt with immutable `registry_reference` and
+per-file blob digests plus the original source/test evidence, and publishes
+that receipt as a separate private OCI artifact at `vVERSION-receipt`. The
+receipt is also downloaded and hash-verified; it does not contain its own
+self-referential digest.
 
-- a pending or existing PyPI Trusted Publisher is configured for
-  `offendingcommit/hermes-plugin-kit`, workflow `release.yml`, and environment
-  `pypi`;
-- the protected GitHub environment is named exactly `pypi`;
-- GitHub immutable releases are enabled for the repository; the workflow
-  verifies the repository control with Administration-read permission after a
-  release intent is materialized but before source promotion, and verifies
-  `isImmutable` after publication. Non-releasing commits never enter a
-  protected environment;
-- an environment named exactly `source-promotion`, restricted to the `main`
-  branch, contains secret `SOURCE_PROMOTION_TOKEN`. Use an approved PAT or
-  existing GitHub credential with repository Administration read and Contents
-  write access. The two guarded steps pass it as `GH_TOKEN`; they fail before
-  any operation if it is absent. No App client ID or private key is required;
+The public immutable GitHub Release is **metadata only**: its body gives the
+private bundle and receipt digest references, and its asset list must be empty.
+No wheel, sdist, or receipt may be attached, even temporarily. Resuming
+publication verifies the source/tag, exact release body references, immutable
+flag, and empty asset inventory. Only the already-public source bundle and
+source-test evidence use Actions artifact uploads. A public repository's
+workflow artifacts are not a private distribution channel.
+
+Release automation remains deliberately disarmed:
+`SEMANTIC_RELEASE_ENABLED=false`. Set it to exactly `true` only after all
+activation prerequisites have been reviewed:
+
+- `ghcr.io/offendingcommit/hermes-plugin-kit` is private with independent,
+  explicitly reviewed package access. It is not linked to the public source
+  repository and does not grant that repository Actions access. Do not add an
+  `org.opencontainers.image.source` annotation or use `GITHUB_TOKEN` to push;
+  those can associate the package with the public repository;
+- an environment named exactly `private-artifacts`, restricted to `main`,
+  contains `PRIVATE_ARTIFACTS_TOKEN`: an approved classic PAT with
+  `read:packages` and `write:packages` and package write access. The source
+  promotion environment also contains `PRIVATE_ARTIFACTS_TOKEN` with package
+  read access (prefer a distinct read-only PAT there). Keep tokens in protected
+  environment secrets, not repository-wide secrets;
+- GitHub immutable releases are enabled for the repository; the unchanged
+  Administration-read control runs after release intent is materialized and
+  before source promotion. Publication verifies `isImmutable`, the digest
+  references, and zero assets. Non-releasing commits never enter a protected
+  environment;
+- an environment named exactly `source-promotion`, restricted to `main`,
+  contains secret `SOURCE_PROMOTION_TOKEN`. Use an approved PAT or existing
+  GitHub credential with repository Administration read and Contents write.
+  The two guarded steps fail closed if it is absent; no App client ID or
+  private key is required;
 - the source-promotion identity is authorized under the repository's branch
   and tag policies. A PAT does not inherently bypass those policies, and this
   workflow must not remove protections or grant a generic Actions bypass;
-- the source baseline has its reviewed, matching immutable version tag.
+- the source baseline has its reviewed, matching immutable version tag, and
+  the workflow/CLI cutover, negative privacy checks, credentials, permissions,
+  metadata-only release behavior, and authenticated consumer fetch are reviewed.
 
-Prefer a repository-limited fine-grained PAT. Reusing an operator credential
-retains that credential's existing scopes; the environment restriction limits
-where it is available, not what it can access. Keep it confined to the two
-guarded jobs, never the source-testing/build jobs. Provision it through the
-secure secret-management path, not plaintext files, command-line arguments, or
-workflow logs. Branch rulesets are managed separately; this credential change
-does not create a bypass.
+`GH_TOKEN` is a CLI environment variable, not a token type. Registry steps map
+only their protected `PRIVATE_ARTIFACTS_TOKEN` to it; ORAS authentication uses
+stdin and temporary configuration, not persistent credentials. The separate
+`SOURCE_PROMOTION_TOKEN` is available only to the Administration-read and
+atomic-promotion steps, never testing/build jobs or package operations.
+Prefer a repository-limited fine-grained PAT for source promotion; reusing an
+operator credential retains its existing scopes. Environment restrictions
+limit availability, not underlying token permissions. Provision all secrets
+through the secure secret-management path, never plaintext files, arguments,
+or logs. The built-in `GITHUB_TOKEN` handles source checkout and the final
+metadata-only GitHub Release, not private package access or promotion fallback.
 
-`GH_TOKEN` is a CLI environment variable, not a token type. The default Actions
-`GITHUB_TOKEN` still handles the final GitHub Release, but is not a fallback
-for this Administration-read/source-promotion credential. PyPI publication
-continues to use OIDC, not the GitHub token.
+### Recovery boundary
 
-A missing switch, credential, control, baseline tag, test, build, metadata
-check, source identity, or artifact hash stops before publication. The final
-release receipt is the discoverable boundary for downstream qualification;
-source/build success alone is insufficient. Polling and recovery from a
-missed notification belong to that downstream system.
+`v0.9.0` / `c5837a255ea60338e452dedff8f19307d1595636` was promoted to `main`,
+but the old PyPI publication failed before publishing. Do **not** retag,
+rebuild, or rerun that old workflow. Leave release automation disarmed until
+this cutover is reviewed; the next normal release with valid release intent
+uses the private path. Do not backfill `v0.9.0` through the obsolete publisher.
+
+For releases created by the new workflow, recover from the retained private
+candidate digest and the original run's successful build output. Retry only
+the failed promotion/publication jobs, never rebuild the tested bytes. A
+conflicting discovery tag or immutable GitHub Release fails closed rather
+than being overwritten. Keep staged bundle/receipt manifests and their blobs
+available under the package's retention policy for recovery and pinned
+consumers; deleting a candidate needed by a failed run is not a retry strategy.
+
+A missing switch, credential, private visibility check, control, baseline tag,
+test, build, metadata check, source identity, or artifact hash stops the
+release. Private staging alone authorizes neither source promotion nor public
+release creation or live activation. The verified private receipt and its
+immutable metadata-only GitHub Release are the downstream qualification
+boundary; source/build success alone is insufficient. Polling, missed-event
+recovery, qualification, and live activation belong to the downstream system.
 
 ## License
 

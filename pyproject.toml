@@ -1,7 +1,7 @@
 # Dependency manifest for hermes-plugin-kit (uv-native, GitOps source of truth).
-# Unlike path-loaded plugins, this is a public installable library: consuming
-# plugins declare a compatible PyPI range and import it. It keeps a build-system
-# and stays buildable; it is not `package = false`.
+# Unlike path-loaded plugins, this is an installable library with public source
+# and private GHCR release artifacts. Consumers declare compatible API ranges
+# and install verified, digest-pinned wheels. Keep its build-system enabled.
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
