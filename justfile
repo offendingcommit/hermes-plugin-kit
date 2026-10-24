@@ -155,7 +155,8 @@ test-context-engine-contract:
     #!/usr/bin/env bash
     set -euo pipefail
     : "${HERMES_AGENT_PATH:?set it to a hermes-agent checkout; this lane does not guess}"
-    HERMES_CONTRACT_REQUIRED=1 {{ uv }} run python -m unittest tests.test_context_engine_contract -v
+    just provision-hermes-host "$HERMES_AGENT_PATH" "{{ hermes_pinned_venv }}"
+    HERMES_CONTRACT_REQUIRED=1 "{{ hermes_pinned_venv }}/bin/python" -m unittest tests.test_context_engine_contract -v
 
 # Refuse to run when the installed OpenSpec predates the archive-correctness fixes.
 [private]
