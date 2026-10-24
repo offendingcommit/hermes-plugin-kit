@@ -6,7 +6,9 @@ min_version = "2026.10.15"
 
 [tools]
 # Must equal the Python in the deployed Hermes image (upstream pm/lock.json).
-python = "3.14.9"
+# 3.13 exists only for the pre-upgrade host's venv (its requires-python is <3.14);
+# drop it when DEPLOYED_HERMES_REVISION moves to v0.22.5 or later.
+python = ["3.14.9", "3.13.14"]
 uv = "0.13.5"
 just = "1.59.0"
 

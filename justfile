@@ -6,6 +6,8 @@ openspec_min := "1.13.1"
 hermes_agent_repo := env_var_or_default("HERMES_AGENT_REPO", "https://github.com/NousResearch/hermes-agent.git")
 hermes_pinned_dir := env_var_or_default("HERMES_PINNED_DIR", ".hermes-agent-pinned")
 hermes_upstream_dir := env_var_or_default("HERMES_UPSTREAM_DIR", ".hermes-agent-upstream")
+hermes_pinned_venv := env_var_or_default("HERMES_PINNED_VENV", ".hermes-venv-pinned")
+hermes_upstream_venv := env_var_or_default("HERMES_UPSTREAM_VENV", ".hermes-venv-upstream")
 
 # Show available recipes.
 default:
@@ -59,6 +61,32 @@ prepare-hermes-ref ref dir:
     git -C "{{ dir }}" checkout -q FETCH_HEAD
     echo "hermes-agent at $(git -C "{{ dir }}" rev-parse HEAD)"
 
+# Build the host's own environment from the host's own lockfile (KTD4).
+#
+# The kit's venv lacks the host's dependencies (ruamel, dotenv, ...), so the
+# contract modules died at import there. The host's `pyproject.toml` alone
+# does not resolve either, so its `uv.lock` is the only faithful source.
+#
+# The interpreter is the first one on PATH that satisfies the host's own
+# `requires-python`. mise.toml installs one per host generation: 3.14.9 for
+# v0.22.5 and later, 3.13 for the pre-upgrade deployed pin (<3.14). The venv
+# lives in this repository, so the host checkout is read, never rewritten.
+[private]
+provision-hermes-host dir venv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    host="$(cd "{{ dir }}" && pwd)"
+    mkdir -p "{{ venv }}"
+    venv="$(cd "{{ venv }}" && pwd)"
+    test -f "$host/uv.lock" || { echo "no uv.lock in $host; cannot provision the host faithfully" >&2; exit 1; }
+    spec="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["requires-python"])' "$host/pyproject.toml")"
+    py="$({{ uv }} python find --system "$spec")" \
+      || { echo "no interpreter on PATH satisfies the host's requires-python $spec; add one to mise.toml" >&2; exit 1; }
+    echo "hermes host python: $("$py" -V 2>&1) at $py (host requires-python $spec)"
+    (cd "$host" && UV_PROJECT_ENVIRONMENT="$venv" {{ uv }} sync --frozen --quiet --python "$py")
+    # --no-deps: the environment stays exactly the host's lock.
+    {{ uv }} pip install --quiet --python "$venv/bin/python" --no-deps --reinstall-package hermes-plugin-kit .
+
 # Run the full contract suite against the deployed pin.
 #
 # HERMES_EXPECTED_REVISION makes the lane refuse a checkout at any other
@@ -71,9 +99,10 @@ test-contract-pinned:
     if [[ -z "${HERMES_AGENT_PATH:-}" ]]; then
       just prepare-hermes-ref "$pin" "{{ hermes_pinned_dir }}"
     fi
+    just provision-hermes-host "$dir" "{{ hermes_pinned_venv }}"
     HERMES_CONTRACT_REQUIRED=1 HERMES_EXPECTED_REVISION="$pin" \
       HERMES_AGENT_PATH="$(cd "$dir" && pwd)" \
-      just _run-contract-suite "pinned $pin"
+      just _run-contract-suite "pinned $pin" "{{ hermes_pinned_venv }}"
 
 # Run the full contract suite against upstream main -- the drift lane.
 test-contract-upstream:
@@ -84,25 +113,27 @@ test-contract-upstream:
       just prepare-hermes-ref main "{{ hermes_upstream_dir }}"
     fi
     rev="$(git -C "$dir" rev-parse HEAD)"
+    just provision-hermes-host "$dir" "{{ hermes_upstream_venv }}"
     HERMES_CONTRACT_REQUIRED=1 HERMES_AGENT_PATH="$(cd "$dir" && pwd)" \
-      just _run-contract-suite "upstream $rev"
+      just _run-contract-suite "upstream $rev" "{{ hermes_upstream_venv }}"
 
 # Backwards-compatible alias for the upstream lane.
 test-contract: test-contract-upstream
 
 # Run both contract modules and prove the run actually executed checks.
 #
-# The exit status alone cannot say whether anything ran: on Python 3.11 --
-# the version CI pins -- unittest exits 0 both when every test skips and when
-# zero tests are collected. So the executed count is the evidence.
+# The exit status alone cannot say whether anything ran: unittest exits 0 when
+# every test skips, and on Python before 3.12 also when zero tests are
+# collected. So the executed count is the evidence. The suite runs on the
+# host's own environment (see provision-hermes-host).
 [private]
-_run-contract-suite label:
+_run-contract-suite label venv:
     #!/usr/bin/env bash
     set -euo pipefail
     log="$(mktemp)"
     trap 'rm -f "$log"' EXIT
     set +e
-    {{ uv }} run python -m unittest tests.test_hermes_contract tests.test_context_engine_contract -v \
+    "{{ venv }}/bin/python" -m unittest tests.test_hermes_contract tests.test_context_engine_contract -v \
       > "$log" 2>&1
     echo "EXIT=$?" >> "$log"
     set -e
