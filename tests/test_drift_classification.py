@@ -193,8 +193,15 @@ class RunThatDidNotExecuteTests(unittest.TestCase):
         self.assertTrue(new)
 
     def test_a_log_with_no_ran_line_is_new_drift(self) -> None:
-        """Provisioning died before the suite started: nothing ran."""
-        log = "error: Failed to spawn: `uv sync`\nEXIT=2\n"
+        """The suite died before its summary, whatever the exit said."""
+        log = "test_x (tests.test_hermes_contract.T.test_x) ... ok\nEXIT=0\n"
+
+        _, new = classify_drift.classify(log, {})
+
+        self.assertTrue(new)
+
+    def test_a_log_with_no_exit_line_is_new_drift(self) -> None:
+        log = "\n" + "-" * 70 + "\nRan 17 tests in 0.601s\n\nOK\n"
 
         _, new = classify_drift.classify(log, {})
 

@@ -106,7 +106,9 @@ _run-contract-suite label:
       > "$log" 2>&1
     echo "EXIT=$?" >> "$log"
     set -e
-    tail -25 "$log"
+    # The whole log, not a tail: the drift classifier reads this output, and a
+    # tail cut the ERROR headers of an import failure and read as clean.
+    cat "$log"
     grep -qE '^EXIT=0' "$log" || { echo "contract suite failed ({{ label }})" >&2; exit 1; }
     ran="$(grep -oE '^Ran [0-9]+' "$log" | grep -oE '[0-9]+' | head -n1)"
     test -n "$ran" && [ "$ran" -gt 0 ] \
