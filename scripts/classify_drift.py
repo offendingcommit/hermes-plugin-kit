@@ -93,14 +93,10 @@ def fingerprint(body: str) -> str:
 _IMPORT_FAILURE = re.compile(r"^ImportError: Failed to import test module: (\S+)", re.M)
 _RAN = re.compile(r"^Ran (\d+) tests?\b", re.M)
 _EXIT = re.compile(r"^EXIT=(\d+)\s*$", re.M)
+_SKIPPED = re.compile(r"^(?:OK|FAILED) \(.*\bskipped=(\d+)", re.M)
 
 
 def _did_not_execute(log: str, parsed_failures: int) -> list[str]:
-    """Reasons the log is not evidence that the suite ran its checks.
-
-    These need no failure block: the blocks are exactly what goes missing when
-    a run dies early or only part of its log arrives.
-    """
     reasons = [
         f"{module} — failed to import, so none of its checks ran"
         for module in dict.fromkeys(_IMPORT_FAILURE.findall(log))
@@ -110,6 +106,9 @@ def _did_not_execute(log: str, parsed_failures: int) -> list[str]:
         reasons.append("no `Ran N tests` line — the suite never completed")
     elif int(ran[-1]) == 0:
         reasons.append("Ran 0 tests — nothing was checked")
+    skipped = sum(int(n) for n in _SKIPPED.findall(log))
+    if skipped:
+        reasons.append(f"{skipped} contract tests skipped — they checked nothing")
     exits = [int(code) for code in _EXIT.findall(log)]
     if not exits:
         reasons.append("no `EXIT=` line — the run's outcome is unknown")
