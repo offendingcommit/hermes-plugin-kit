@@ -9,6 +9,8 @@ tests hold the normalization that prevents that.
 from __future__ import annotations
 
 import importlib.util
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -20,6 +22,12 @@ _spec = importlib.util.spec_from_file_location(
 classify_drift = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
 _spec.loader.exec_module(classify_drift)
+
+LOGS = ROOT / "tests" / "fixtures" / "contract-logs"
+
+#: What a completed run with one baselined failure ends with. Without it a log
+#: is not evidence that the suite ran at all.
+_RAN_TRAILER = "\n" + "-" * 70 + "\nRan 17 tests in 0.601s\n\nFAILED (failures=1)\nEXIT=1\n"
 
 
 class FingerprintStabilityTests(unittest.TestCase):
@@ -112,6 +120,7 @@ class BaselineTests(unittest.TestCase):
             + "-" * 70
             + "\nTraceback (most recent call last):\n"
             + f"AssertionError: ... {fingerprint.replace('-', ' ')} ...\n"
+            + _RAN_TRAILER
         )
 
         known, new = classify_drift.classify(log, classify_drift.load_baseline())
@@ -126,12 +135,100 @@ class BaselineTests(unittest.TestCase):
             + "-" * 70
             + "\nTraceback (most recent call last):\n"
             + "AssertionError: an entirely unrelated cause\n"
+            + _RAN_TRAILER
         )
 
         known, new = classify_drift.classify(log, classify_drift.load_baseline())
 
         self.assertEqual([], known)
         self.assertEqual(1, len(new), "a baselined test failing differently is a new break")
+
+
+class RunThatDidNotExecuteTests(unittest.TestCase):
+    """A suite that never ran its checks is drift, not a clean report.
+
+    The captured logs under ``tests/fixtures/contract-logs`` come from a real
+    run where both contract modules died importing the host
+    (``No module named 'ruamel'``). The tail-only one is exactly what the drift
+    workflow handed the classifier while the lane printed ``tail -25``: the
+    ``ERROR:`` headers were cut, no failure block parsed, and the report read
+    "No contract failures against upstream."
+    """
+
+    def test_tail_of_an_import_failure_is_new_drift_naming_the_module(self) -> None:
+        log = (LOGS / "import-failure-tail.log").read_text()
+
+        known, new = classify_drift.classify(log, classify_drift.load_baseline())
+
+        self.assertEqual([], known)
+        self.assertTrue(new, "an import failure must never classify as clean")
+        self.assertTrue(
+            any("test_context_engine_contract" in entry for entry in new), new
+        )
+
+    def test_full_import_failure_log_names_both_modules(self) -> None:
+        log = (LOGS / "import-failure-full.log").read_text()
+
+        _, new = classify_drift.classify(log, classify_drift.load_baseline())
+
+        joined = "\n".join(new)
+        self.assertIn("test_hermes_contract", joined)
+        self.assertIn("test_context_engine_contract", joined)
+
+    def test_the_cli_exits_non_zero_on_the_tail_only_log(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "classify_drift.py"),
+             str(LOGS / "import-failure-tail.log"), "0" * 40],
+            capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(1, result.returncode, result.stdout)
+        self.assertNotIn("No contract failures", result.stdout)
+
+    def test_zero_tests_ran_is_new_drift_even_when_unittest_exits_zero(self) -> None:
+        log = "\n" + "-" * 70 + "\nRan 0 tests in 0.000s\n\nOK\nEXIT=0\n"
+
+        _, new = classify_drift.classify(log, {})
+
+        self.assertTrue(new)
+
+    def test_a_log_with_no_ran_line_is_new_drift(self) -> None:
+        """The suite died before its summary, whatever the exit said."""
+        log = "test_x (tests.test_hermes_contract.T.test_x) ... ok\nEXIT=0\n"
+
+        _, new = classify_drift.classify(log, {})
+
+        self.assertTrue(new)
+
+    def test_a_log_with_no_exit_line_is_new_drift(self) -> None:
+        log = "\n" + "-" * 70 + "\nRan 17 tests in 0.601s\n\nOK\n"
+
+        _, new = classify_drift.classify(log, {})
+
+        self.assertTrue(new)
+
+    def test_a_non_zero_exit_with_no_parsed_failure_is_new_drift(self) -> None:
+        log = "\n" + "-" * 70 + "\nRan 17 tests in 0.601s\n\nOK\nEXIT=0\nEXIT=1\n"
+
+        _, new = classify_drift.classify(log, {})
+
+        self.assertTrue(new)
+
+    def test_a_run_that_skipped_contract_tests_is_new_drift(self) -> None:
+        """A skipped contract test checked nothing, whatever the exit said."""
+        log = "\n" + "-" * 70 + "\nRan 17 tests in 0.601s\n\nOK (skipped=3)\nEXIT=0\n"
+
+        _, new = classify_drift.classify(log, {})
+
+        self.assertTrue(any("skipped" in entry for entry in new), new)
+
+    def test_a_clean_run_reports_no_drift(self) -> None:
+        log = (
+            "test_x (tests.test_hermes_contract.HermesContractTests.test_x) ... ok\n"
+            "\n" + "-" * 70 + "\nRan 17 tests in 0.601s\n\nOK\nEXIT=0\nEXIT=0\n"
+        )
+
+        self.assertEqual(([], []), classify_drift.classify(log, {}))
 
 
 if __name__ == "__main__":

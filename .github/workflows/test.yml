@@ -16,6 +16,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install the locked toolchain (mise.toml)
         uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
+        with:
+          # Pinned so every run, release jobs included, installs the same mise;
+          # the action still verifies it against mise's signed checksums.
+          version: "2026.10.18"
       - name: Run unittest suite
         run: just test
 
@@ -25,6 +29,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install the locked toolchain (mise.toml)
         uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
+        with:
+          # Pinned so every run, release jobs included, installs the same mise;
+          # the action still verifies it against mise's signed checksums.
+          version: "2026.10.18"
       - name: Build and validate package metadata
         run: |
           just build
@@ -44,16 +52,20 @@ jobs:
   hermes-deployed-contract:
     runs-on: ubuntu-latest
     env:
-      DEPLOYED_HERMES_REVISION: f80f453ae0679347e38abc917c7f94f717bf96c5
+      DEPLOYED_HERMES_REVISION: 939e45c91d751fadd94dcd1b873ac3cb44846213
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: NousResearch/hermes-agent
-          ref: f80f453ae0679347e38abc917c7f94f717bf96c5
+          ref: 939e45c91d751fadd94dcd1b873ac3cb44846213
           path: .hermes-agent-deployed
       - name: Install the locked toolchain (mise.toml)
         uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e  # v5.2.3
+        with:
+          # Pinned so every run, release jobs included, installs the same mise;
+          # the action still verifies it against mise's signed checksums.
+          version: "2026.10.18"
       # The full suite, not the context-engine module alone. It is green at
       # this pin, so widening adds coverage rather than risk.
       - name: Run the full contract suite against the deployed Hermes revision

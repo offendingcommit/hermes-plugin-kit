@@ -1,0 +1,54 @@
+test_hermes_contract (unittest.loader._FailedTest.test_hermes_contract) ... ERROR
+test_context_engine_contract (unittest.loader._FailedTest.test_context_engine_contract) ... ERROR
+
+======================================================================
+ERROR: test_hermes_contract (unittest.loader._FailedTest.test_hermes_contract)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_hermes_contract
+Traceback (most recent call last):
+  File "/home/runner/.local/share/mise/installs/python/3.14.9/lib/python3.14/unittest/loader.py", line 141, in loadTestsFromName
+    module = __import__(module_name)
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/tests/test_hermes_contract.py", line 119, in <module>
+    _REAL = _import_real_hermes()
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/tests/test_hermes_contract.py", line 116, in _import_real_hermes
+    return _try()
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/tests/test_hermes_contract.py", line 56, in _try
+    from hermes_cli.plugins import (  # type: ignore
+    ...<5 lines>...
+    )
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/.hermes-agent-upstream/hermes_cli/plugins.py", line 31, in <module>
+    from utils import env_var_enabled
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/.hermes-agent-upstream/utils.py", line 18, in <module>
+    import hermes_yaml as yaml
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/.hermes-agent-upstream/hermes_yaml.py", line 10, in <module>
+    from ruamel.yaml import YAML
+ModuleNotFoundError: No module named 'ruamel'
+
+
+======================================================================
+ERROR: test_context_engine_contract (unittest.loader._FailedTest.test_context_engine_contract)
+----------------------------------------------------------------------
+ImportError: Failed to import test module: test_context_engine_contract
+Traceback (most recent call last):
+  File "/home/runner/.local/share/mise/installs/python/3.14.9/lib/python3.14/unittest/loader.py", line 141, in loadTestsFromName
+    module = __import__(module_name)
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/tests/test_context_engine_contract.py", line 37, in <module>
+    _HOST = _import_deployed_host()
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/tests/test_context_engine_contract.py", line 28, in _import_deployed_host
+    from hermes_cli.plugins import (  # type: ignore
+    ...<3 lines>...
+    )
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/.hermes-agent-upstream/hermes_cli/plugins.py", line 31, in <module>
+    from utils import env_var_enabled
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/.hermes-agent-upstream/utils.py", line 18, in <module>
+    import hermes_yaml as yaml
+  File "/home/runner/work/hermes-plugin-kit/hermes-plugin-kit/.hermes-agent-upstream/hermes_yaml.py", line 10, in <module>
+    from ruamel.yaml import YAML
+ModuleNotFoundError: No module named 'ruamel'
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.000s
+
+FAILED (errors=2)
+EXIT=1
