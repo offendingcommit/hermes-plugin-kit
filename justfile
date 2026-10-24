@@ -84,8 +84,10 @@ provision-hermes-host dir venv:
       || { echo "no interpreter on PATH satisfies the host's requires-python $spec; add one to mise.toml" >&2; exit 1; }
     echo "hermes host python: $("$py" -V 2>&1) at $py (host requires-python $spec)"
     (cd "$host" && UV_PROJECT_ENVIRONMENT="$venv" {{ uv }} sync --frozen --quiet --python "$py")
-    # --no-deps: the environment stays exactly the host's lock.
-    {{ uv }} pip install --quiet --python "$venv/bin/python" --no-deps --reinstall-package hermes-plugin-kit .
+    # The kit installs with its declared deps, as the runtime image installs it.
+    # Packages the host lock already satisfies are left alone; v0.22.5 dropped
+    # PyYAML from its lock, so --no-deps left plugin_skill without `yaml`.
+    {{ uv }} pip install --quiet --python "$venv/bin/python" --reinstall-package hermes-plugin-kit .
 
 # Run the full contract suite against the deployed pin.
 #
