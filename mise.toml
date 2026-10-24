@@ -1,0 +1,16 @@
+# The one home for this repository's toolchain. CI installs these tools with
+# jdx/mise-action from mise.lock, so laptops and CI run the same Python, uv and
+# Just. Run `mise trust && mise install --locked` once per checkout; the
+# justfile recipes stay the entry points.
+min_version = "2026.10.15"
+
+[tools]
+# Must equal the Python in the deployed Hermes image (upstream pm/lock.json).
+python = "3.14.9"
+uv = "0.13.1"
+just = "1.58.0"
+
+[env]
+# uv must run on mise's Python, never on one it manages or downloads itself.
+UV_PYTHON_PREFERENCE = "only-system"
+UV_PYTHON_DOWNLOADS = "never"
