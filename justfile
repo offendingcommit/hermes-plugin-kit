@@ -61,16 +61,11 @@ prepare-hermes-ref ref dir:
     git -C "{{ dir }}" checkout -q FETCH_HEAD
     echo "hermes-agent at $(git -C "{{ dir }}" rev-parse HEAD)"
 
-# Build the host's own environment from the host's own lockfile (KTD4).
+# Build the host's own environment from the host's own lockfile.
 #
 # The kit's venv lacks the host's dependencies (ruamel, dotenv, ...), so the
 # contract modules died at import there. The host's `pyproject.toml` alone
 # does not resolve either, so its `uv.lock` is the only faithful source.
-#
-# The interpreter is the first one on PATH that satisfies the host's own
-# `requires-python`. mise.toml installs one per host generation: 3.14.9 for
-# v0.22.5 and later, 3.13 for the pre-upgrade deployed pin (<3.14). The venv
-# lives in this repository, so the host checkout is read, never rewritten.
 [private]
 provision-hermes-host dir venv:
     #!/usr/bin/env bash
@@ -79,14 +74,11 @@ provision-hermes-host dir venv:
     mkdir -p "{{ venv }}"
     venv="$(cd "{{ venv }}" && pwd)"
     test -f "$host/uv.lock" || { echo "no uv.lock in $host; cannot provision the host faithfully" >&2; exit 1; }
-    spec="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["requires-python"])' "$host/pyproject.toml")"
+    spec="$({{ uv }} run python -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["requires-python"])' "$host/pyproject.toml")"
     py="$({{ uv }} python find --system "$spec")" \
       || { echo "no interpreter on PATH satisfies the host's requires-python $spec; add one to mise.toml" >&2; exit 1; }
     echo "hermes host python: $("$py" -V 2>&1) at $py (host requires-python $spec)"
     (cd "$host" && UV_PROJECT_ENVIRONMENT="$venv" {{ uv }} sync --frozen --quiet --python "$py")
-    # The kit installs with its declared deps, as the runtime image installs it.
-    # Packages the host lock already satisfies are left alone; v0.22.5 dropped
-    # PyYAML from its lock, so --no-deps left plugin_skill without `yaml`.
     {{ uv }} pip install --quiet --python "$venv/bin/python" --reinstall-package hermes-plugin-kit .
 
 # Run the full contract suite against the deployed pin.
@@ -125,9 +117,7 @@ test-contract: test-contract-upstream
 # Run both contract modules and prove the run actually executed checks.
 #
 # The exit status alone cannot say whether anything ran: unittest exits 0 when
-# every test skips, and on Python before 3.12 also when zero tests are
-# collected. So the executed count is the evidence. The suite runs on the
-# host's own environment (see provision-hermes-host).
+# every test skips. So the executed count is the evidence.
 [private]
 _run-contract-suite label venv:
     #!/usr/bin/env bash
@@ -139,8 +129,6 @@ _run-contract-suite label venv:
       > "$log" 2>&1
     echo "EXIT=$?" >> "$log"
     set -e
-    # The whole log, not a tail: the drift classifier reads this output, and a
-    # tail cut the ERROR headers of an import failure and read as clean.
     cat "$log"
     grep -qE '^EXIT=0' "$log" || { echo "contract suite failed ({{ label }})" >&2; exit 1; }
     ran="$(grep -oE '^Ran [0-9]+' "$log" | grep -oE '[0-9]+' | head -n1)"

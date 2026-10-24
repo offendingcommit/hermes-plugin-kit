@@ -96,11 +96,6 @@ _EXIT = re.compile(r"^EXIT=(\d+)\s*$", re.M)
 
 
 def _did_not_execute(log: str, parsed_failures: int) -> list[str]:
-    """Reasons the log is not evidence that the suite ran its checks.
-
-    These need no failure block: the blocks are exactly what goes missing when
-    a run dies early or only part of its log arrives.
-    """
     reasons = [
         f"{module} — failed to import, so none of its checks ran"
         for module in dict.fromkeys(_IMPORT_FAILURE.findall(log))

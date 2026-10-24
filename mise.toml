@@ -1,7 +1,3 @@
-# The one home for this repository's toolchain. CI installs these tools with
-# jdx/mise-action from mise.lock, so laptops and CI run the same Python, uv and
-# Just. Run `mise trust && mise install --locked` once per checkout; the
-# justfile recipes stay the entry points.
 min_version = "2026.10.15"
 
 [tools]
