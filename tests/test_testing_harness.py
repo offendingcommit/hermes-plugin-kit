@@ -180,6 +180,20 @@ class AbsentHostTests(unittest.TestCase):
     def test_deployed_revision_is_a_full_commit_sha(self) -> None:
         self.assertRegex(hpk_testing.DEPLOYED_HERMES_REVISION, r"^[0-9a-f]{40}$")
 
+    def test_the_deployed_contract_job_checks_out_the_same_revision(self) -> None:
+        """The workflow cannot read the constant, so its two literals must match it."""
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "test.yml"
+        ).read_text()
+        job = workflow.split("hermes-deployed-contract:", 1)[1]
+        literals = re.findall(r"(?:DEPLOYED_HERMES_REVISION:|ref:)\s*([0-9a-f]{40})", job)
+
+        self.assertEqual(
+            [hpk_testing.DEPLOYED_HERMES_REVISION] * 2, literals,
+            "test.yml's hermes-deployed-contract env and checkout ref must equal "
+            "hermes_plugin_kit.testing.DEPLOYED_HERMES_REVISION",
+        )
+
 
 class HostShapeModeTests(unittest.TestCase):
     """Both branches of the kit's own capability probe must be reachable."""

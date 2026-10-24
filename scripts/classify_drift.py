@@ -90,10 +90,38 @@ def fingerprint(body: str) -> str:
     return "unknown"
 
 
+_IMPORT_FAILURE = re.compile(r"^ImportError: Failed to import test module: (\S+)", re.M)
+_RAN = re.compile(r"^Ran (\d+) tests?\b", re.M)
+_EXIT = re.compile(r"^EXIT=(\d+)\s*$", re.M)
+_SKIPPED = re.compile(r"^(?:OK|FAILED) \(.*\bskipped=(\d+)", re.M)
+
+
+def _did_not_execute(log: str, parsed_failures: int) -> list[str]:
+    reasons = [
+        f"{module} — failed to import, so none of its checks ran"
+        for module in dict.fromkeys(_IMPORT_FAILURE.findall(log))
+    ]
+    ran = _RAN.findall(log)
+    if not ran:
+        reasons.append("no `Ran N tests` line — the suite never completed")
+    elif int(ran[-1]) == 0:
+        reasons.append("Ran 0 tests — nothing was checked")
+    skipped = sum(int(n) for n in _SKIPPED.findall(log))
+    if skipped:
+        reasons.append(f"{skipped} contract tests skipped — they checked nothing")
+    exits = [int(code) for code in _EXIT.findall(log)]
+    if not exits:
+        reasons.append("no `EXIT=` line — the run's outcome is unknown")
+    elif any(exits) and parsed_failures == 0:
+        reasons.append(f"suite exited {max(exits)} with no failure the log explains")
+    return reasons
+
+
 def classify(log: str, baseline: dict[str, str]) -> tuple[list[str], list[str]]:
     known: list[str] = []
     new: list[str] = []
-    for match in _BLOCK.finditer(log):
+    blocks = list(_BLOCK.finditer(log))
+    for match in blocks:
         test_id = match.group("test_id")
         print_id = test_id
         fp = fingerprint(match.group("body"))
@@ -105,6 +133,7 @@ def classify(log: str, baseline: dict[str, str]) -> tuple[list[str], list[str]]:
                 f"baselined as {expected!r} but failed as {fp!r}"
             )
             new.append(f"{print_id} — {reason}")
+    new += _did_not_execute(log, len(blocks))
     return known, new
 
 

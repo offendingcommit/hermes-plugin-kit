@@ -9,3 +9,5 @@ dist/
 .hermes-agent-pinned/
 .hermes-agent-upstream/
 .DS_Store
+.hermes-venv-pinned/
+.hermes-venv-upstream/

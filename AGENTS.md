@@ -73,8 +73,11 @@ plugin.
   and recovery dispatch on `get_tool_schemas` / `handle_tool_call`; do not
   duplicate native engine tools through `@tool`.
 - Redact secret-looking values in logs and avoid logging full untrusted payloads.
-- Use `uv` and the `justfile` for local development:
-  `just install`, `just test`,
+- Get Python, `uv` and `just` from `mise.toml` and `mise.lock`
+  (`mise trust && mise install --locked`), the same toolchain CI installs;
+  after changing a tool pin, regenerate the lock with
+  `mise lock --platform linux-x64,linux-arm64,macos-arm64`. Then use the
+  `justfile` for local development: `just install`, `just test`,
   `just test-one tests.test_kit.SchemaConventionTests`, and `just build`.
 
 ## Release Notes

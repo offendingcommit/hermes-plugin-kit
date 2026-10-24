@@ -859,10 +859,16 @@ so the linked directory is self-contained.
 
 ## Development
 
-Uses [uv](https://docs.astral.sh/uv/) and
-[Just](https://github.com/casey/just). On macOS, install both with
-`brew install uv just`; otherwise install them using their platform-specific
-instructions.
+Uses [mise](https://mise.jdx.dev/) to install the pinned Python,
+[uv](https://docs.astral.sh/uv/) and [Just](https://github.com/casey/just)
+from `mise.toml` and `mise.lock`, the same toolchain CI installs. Once per
+checkout:
+
+```bash
+mise trust && mise install --locked
+```
+
+Then:
 
 ```bash
 just install      # uv sync — create/sync the dev environment
