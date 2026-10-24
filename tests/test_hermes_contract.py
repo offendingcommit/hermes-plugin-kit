@@ -68,7 +68,11 @@ def _import_real_hermes():
             run_tool_execution_middleware,
         )
         from tools.registry import registry  # type: ignore
-        from hermes_state import SCHEMA_VERSION, SessionDB  # type: ignore
+        from hermes_state import SessionDB  # type: ignore
+        try:  # v0.22.5 dropped the hermes_state re-export (upstream #126164)
+            from hermes_state_common import SCHEMA_VERSION  # type: ignore
+        except ImportError:
+            from hermes_state import SCHEMA_VERSION  # type: ignore
         from agent.context_engine import ContextEngine  # type: ignore
 
         # A stale checkout that predates plugin-owned skills is not the
