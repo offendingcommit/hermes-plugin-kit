@@ -7,8 +7,8 @@ min_version = "2026.10.15"
 [tools]
 # Must equal the Python in the deployed Hermes image (upstream pm/lock.json).
 python = "3.14.9"
-uv = "0.13.1"
-just = "1.58.0"
+uv = "0.13.5"
+just = "1.59.0"
 
 [env]
 # uv must run on mise's Python, never on one it manages or downloads itself.
