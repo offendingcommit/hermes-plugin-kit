@@ -214,6 +214,14 @@ class RunThatDidNotExecuteTests(unittest.TestCase):
 
         self.assertTrue(new)
 
+    def test_a_run_that_skipped_contract_tests_is_new_drift(self) -> None:
+        """A skipped contract test checked nothing, whatever the exit said."""
+        log = "\n" + "-" * 70 + "\nRan 17 tests in 0.601s\n\nOK (skipped=3)\nEXIT=0\n"
+
+        _, new = classify_drift.classify(log, {})
+
+        self.assertTrue(any("skipped" in entry for entry in new), new)
+
     def test_a_clean_run_reports_no_drift(self) -> None:
         log = (
             "test_x (tests.test_hermes_contract.HermesContractTests.test_x) ... ok\n"
