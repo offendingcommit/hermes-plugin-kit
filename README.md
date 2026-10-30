@@ -489,6 +489,12 @@ A handler returns a `dict` (becomes the success `data`), or raises (becomes a to
 error), or returns a `str` as an escape hatch (treated as already-encoded JSON). It must
 accept `(args, **kwargs)` — runtime keys like `task_id`/`session_id` arrive as kwargs.
 
+For an expected failure, raise `ToolError(message, **fields)`. The result is
+`{"success": false, "error": message, **fields}`, so codes and state such as
+`rolled_back` reach the model. It is logged as a warning without a traceback.
+Any other exception is unexpected: it is logged with its traceback and reported
+as `"<tool> failed: <exception>"`.
+
 ## Session state helpers
 
 The kit can read sessions and messages and append transcript rows through

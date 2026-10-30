@@ -77,6 +77,7 @@ from .observability import (
 
 __all__ = [
     "tool",
+    "ToolError",
     "command",
     "middleware",
     "hook",
@@ -2156,6 +2157,23 @@ def deliver_media(
     )
 
 
+class ToolError(Exception):
+    """An expected tool failure whose fields reach the model beside the message.
+
+    Raise it from a :func:`tool` handler: the result is
+    ``{"success": false, "error": message, **fields}``. Any other exception is
+    an unexpected failure, logged with its traceback and reported by its text.
+    """
+
+    def __init__(self, message: str, **fields: Any) -> None:
+        reserved = {"success", "error"} & fields.keys()
+        if reserved:
+            raise ValueError(f"ToolError fields may not set {sorted(reserved)}")
+        super().__init__(message)
+        self.message = message
+        self.fields = fields
+
+
 def tool(
     *,
     toolset: str,
@@ -2171,7 +2189,8 @@ def tool(
     """Register-ready hermes tool from a plain handler.
 
     The wrapped handler receives ``(args, **kwargs)`` and returns a ``dict``
-    (becomes the success ``data``) or raises (becomes a tool error). It may also
+    (becomes the success ``data``) or raises (becomes a tool error; raise
+    :class:`ToolError` to add structured fields). It may also
     return a ``str`` as an escape hatch (treated as already-encoded JSON).
     Supply either kit ``params`` or an existing Hermes function ``schema``.
     ``validate_required=False`` leaves required-field errors to the handler
@@ -2239,6 +2258,17 @@ def tool(
                         )
             try:
                 result = fn(args, **kwargs)
+            except ToolError as exc:
+                log.warning(
+                    "%s: refused; elapsed_ms=%.2f; error=%s",
+                    tool_name,
+                    (time.perf_counter() - started) * 1000,
+                    exc.message,
+                )
+                return json.dumps(
+                    {"success": False, "error": exc.message, **exc.fields},
+                    ensure_ascii=False,
+                )
             except Exception as exc:  # noqa: BLE001 — tool errors stay in-band
                 log.exception(
                     "%s: handler raised; elapsed_ms=%.2f; error=%s",

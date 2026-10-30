@@ -226,6 +226,12 @@ def sample_boom(args, **kwargs):
     raise RuntimeError("kaboom")
 
 
+@hpk.tool(toolset="x", params={"q": hpk.str_arg("query", required=True)})
+def sample_refuse(args, **kwargs):
+    """Always refuses with structured fields."""
+    raise hpk.ToolError("file changed under you", path="notes/a.md", rolled_back=True)
+
+
 class SchemaConventionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.schema = getattr(sample_read, "_hpk_tool_spec")["schema"]
@@ -395,6 +401,23 @@ class HandlerBehaviorTests(unittest.TestCase):
     def test_blank_string_counts_as_missing(self) -> None:
         out = json.loads(sample_read({"thread_id_or_url": "   "}))
         self.assertFalse(out["success"])
+
+    def test_tool_error_keeps_its_fields_and_logs_no_traceback(self) -> None:
+        with self.assertLogs(level="WARNING") as cap:
+            raw = sample_refuse({"q": "x"})
+        self.assertEqual(
+            raw,
+            '{"success": false, "error": "file changed under you", '
+            '"path": "notes/a.md", "rolled_back": true}',
+        )
+        joined = "\n".join(cap.output)
+        self.assertIn("sample_refuse: refused", joined)
+        self.assertNotIn("Traceback", joined)
+
+    def test_tool_error_refuses_reserved_field_names(self) -> None:
+        for key in ("success", "error"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                hpk.ToolError("x", **{key: 1})
 
     def test_exception_caught_in_band(self) -> None:
         with self.assertLogs(level="WARNING") as cap:
