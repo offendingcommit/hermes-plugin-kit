@@ -1221,6 +1221,16 @@ class MediaDeliveryContractTests(unittest.TestCase):
             )
         )
 
+    def test_strip_media_mirror_lines_removes_only_whole_placeholder_lines(self) -> None:
+        self.assertEqual(
+            hpk.strip_media_mirror_lines("Here she is.\n\nMEDIA:/x.jpg\n[Sent voice message]\n"),
+            "Here she is.\n\nMEDIA:/x.jpg",
+        )
+        self.assertEqual(hpk.strip_media_mirror_lines("NO_REPLY\n[Sent image attachment]"), "✅")
+        self.assertEqual(hpk.strip_media_mirror_lines("[Sent 3 media attachments]"), "✅")
+        self.assertIsNone(hpk.strip_media_mirror_lines("I saw [Sent voice message] in the log"))
+        self.assertIsNone(hpk.strip_media_mirror_lines("hello"))
+
     def test_successful_delivery_does_not_suppress_another_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "memo.ogg"

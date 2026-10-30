@@ -95,6 +95,7 @@ __all__ = [
     "deliver_media",
     "resolve_delivery_target",
     "MEDIA_DELIVERED_REPLY",
+    "strip_media_mirror_lines",
     "transform_media_delivery_output",
     "clear_media_delivery_state",
     "MediaType",
@@ -1859,6 +1860,27 @@ def _mark_media_delivery_success(context: dict[str, Any]) -> None:
 
 # The turn's visible reply after the attachment itself was already sent.
 MEDIA_DELIVERED_REPLY = "✅"
+
+# Hermes' send_message records each media send as an assistant line so the model
+# remembers it (tools/send_message_tool.py _describe_media_for_mirror). Models copy
+# those lines into real replies, where the user receives them as text.
+_MEDIA_MIRROR_LINE = re.compile(
+    r"\[Sent (?:voice message|(?:image|video|audio|document) attachment|\d+ media attachments)\]"
+)
+
+
+def strip_media_mirror_lines(response_text: str) -> str | None:
+    """Remove whole lines that copy Hermes' sent-media history notes from a final reply.
+
+    Returns ``None`` when there is nothing to remove. A reply left empty, or holding
+    only ``NO_REPLY``, becomes :data:`MEDIA_DELIVERED_REPLY`: the note follows a send.
+    """
+    lines = str(response_text or "").splitlines()
+    kept = [line for line in lines if not _MEDIA_MIRROR_LINE.fullmatch(line.strip())]
+    if len(kept) == len(lines):
+        return None
+    rest = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    return MEDIA_DELIVERED_REPLY if rest in ("", "NO_REPLY") else rest
 
 
 def transform_media_delivery_output(

@@ -696,6 +696,23 @@ class HermesContractTests(unittest.TestCase):
         self.assertTrue(is_intentional_silence_response("NO_REPLY"))
         self.assertFalse(is_intentional_silence_response(hpk.MEDIA_DELIVERED_REPLY))
 
+    def test_strip_media_mirror_lines_matches_every_hermes_mirror_shape(self) -> None:
+        """Each note Hermes' send_message writes into history must be strippable."""
+        from tools.send_message_tool import _describe_media_for_mirror  # type: ignore
+
+        cases = [
+            [("/m/memo.ogg", True)],
+            [("/m/pic.png", False)],
+            [("/m/clip.mp4", False)],
+            [("/m/song.mp3", False)],
+            [("/m/notes.pdf", False)],
+            [("/m/a.png", False), ("/m/b.png", False)],
+        ]
+        for media in cases:
+            note = _describe_media_for_mirror(media)
+            with self.subTest(note=note):
+                self.assertEqual(hpk.strip_media_mirror_lines(f"Done.\n{note}"), "Done.")
+
     def test_host_tool_invocation_reaches_real_telegram_media_contract(self) -> None:
         """Exercise Hermes media parsing and Telegram formatting without network I/O."""
         import asyncio
