@@ -689,6 +689,13 @@ class HermesContractTests(unittest.TestCase):
         for method in ("launch", "status", "wait", "cancel", "result", "reconnect"):
             self.assertTrue(callable(getattr(service, method)))
 
+    def test_media_delivered_reply_is_not_a_hermes_silence_marker(self) -> None:
+        """Hermes v0.22+ replaces a silence marker on a user turn with a warning."""
+        from gateway.response_filters import is_intentional_silence_response  # type: ignore
+
+        self.assertTrue(is_intentional_silence_response("NO_REPLY"))
+        self.assertFalse(is_intentional_silence_response(hpk.MEDIA_DELIVERED_REPLY))
+
     def test_host_tool_invocation_reaches_real_telegram_media_contract(self) -> None:
         """Exercise Hermes media parsing and Telegram formatting without network I/O."""
         import asyncio
