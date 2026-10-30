@@ -414,6 +414,12 @@ class HandlerBehaviorTests(unittest.TestCase):
                 """Reserved."""
                 return {}
 
+    def test_renamed_and_legacy_agent_loop_names_rejected(self) -> None:
+        # Hermes v0.22 intercepts todo_list and rewrites legacy names such as cronjob.
+        for name in ("todo_list", "cronjob", "tip"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "reserved"):
+                hpk.validate_tool_name(name)
+
     def test_reserved_core_namespace_prefix_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "reserved Hermes core namespace"):
             hpk.tool_name("memory", "write", "entry")

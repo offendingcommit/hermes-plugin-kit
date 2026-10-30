@@ -712,6 +712,13 @@ class HermesContractTests(unittest.TestCase):
             note = _describe_media_for_mirror(media)
             with self.subTest(note=note):
                 self.assertEqual(hpk.strip_media_mirror_lines(f"Done.\n{note}"), "Done.")
+    def test_reserved_tool_names_match_the_host(self) -> None:
+        """The kit's offline fallback must equal what the deployed Hermes intercepts."""
+        from model_tools import _AGENT_LOOP_TOOLS, _LEGACY_TOOL_ALIASES  # type: ignore
+
+        host = frozenset(_AGENT_LOOP_TOOLS) | frozenset(_LEGACY_TOOL_ALIASES)
+        self.assertEqual(hpk._agent_loop_tool_names(), host)
+        self.assertEqual(hpk._AGENT_LOOP_TOOL_NAMES, host)
 
     def test_host_tool_invocation_reaches_real_telegram_media_contract(self) -> None:
         """Exercise Hermes media parsing and Telegram formatting without network I/O."""
