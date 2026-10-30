@@ -733,8 +733,10 @@ def register(ctx):
 ```
 
 Successful delivery arms a one-turn marker for the current Hermes session.
-`transform_media_delivery_output` consumes it and returns Hermes' canonical
-`NO_REPLY` response before the gateway sees the final text. Failed delivery does
+`transform_media_delivery_output` consumes it and replaces the final text with
+`MEDIA_DELIVERED_REPLY` (a single ✅) before the gateway sees it. It does not
+return `NO_REPLY`: Hermes v0.22+ rejects a silence marker on a turn that expects
+a reply and sends the user a warning instead. Failed delivery does
 not arm suppression, and `on_session_end` clears any unconsumed marker. These are
 Hermes-agent lifecycle and response contracts; they are not OpenClaw shapes.
 

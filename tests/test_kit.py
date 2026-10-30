@@ -1211,7 +1211,7 @@ class MediaDeliveryContractTests(unittest.TestCase):
                 session_id="session-1",
                 platform="telegram",
             ),
-            "NO_REPLY",
+            "✅",
         )
         self.assertIsNone(
             hpk.transform_media_delivery_output(

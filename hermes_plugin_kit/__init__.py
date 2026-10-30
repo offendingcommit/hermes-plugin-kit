@@ -94,6 +94,7 @@ __all__ = [
     "SessionDBCompatibilityError",
     "deliver_media",
     "resolve_delivery_target",
+    "MEDIA_DELIVERED_REPLY",
     "transform_media_delivery_output",
     "clear_media_delivery_state",
     "MediaType",
@@ -1856,6 +1857,10 @@ def _mark_media_delivery_success(context: dict[str, Any]) -> None:
     )
 
 
+# The turn's visible reply after the attachment itself was already sent.
+MEDIA_DELIVERED_REPLY = "✅"
+
+
 def transform_media_delivery_output(
     response_text: str = "",
     session_id: str = "",
@@ -1865,8 +1870,10 @@ def transform_media_delivery_output(
 
     A successful :func:`deliver_media` call arms one task-local suppression.
     The finalizer then replaces any model-authored text or repeated ``MEDIA``
-    tag with Hermes' canonical ``NO_REPLY`` marker. State is consumed once, so
-    later turns in the same session are unaffected.
+    tag with :data:`MEDIA_DELIVERED_REPLY`. Not ``NO_REPLY``: Hermes v0.22+
+    rejects a silence marker on a turn that expects a reply and sends a
+    warning instead. State is consumed once, so later turns in the same
+    session are unaffected.
     """
     context_id = str(session_id or "").strip()
     if not context_id:
@@ -1881,7 +1888,7 @@ def transform_media_delivery_output(
         "event=media_final_response_suppressed original_chars=%d",
         len(str(response_text or "")),
     )
-    return "NO_REPLY"
+    return MEDIA_DELIVERED_REPLY
 
 
 def clear_media_delivery_state(
