@@ -79,7 +79,7 @@ RECEIPT_FIELD_ORDER: tuple[str, ...] = (
 #: The CI workflow keeps its own literal -- ``actions/checkout`` consumes the
 #: ``ref:`` before a Python toolchain exists, so the workflow cannot read this
 #: value.
-DEPLOYED_HERMES_REVISION = "939e45c91d751fadd94dcd1b873ac3cb44846213"
+DEPLOYED_HERMES_REVISION = "bf0203a794a07aac3ff764972ab9087baa4e4f4e"
 
 #: Parameter names the kit's registrars pass positionally, in order.
 #:

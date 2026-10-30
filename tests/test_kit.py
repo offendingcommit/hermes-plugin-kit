@@ -414,6 +414,12 @@ class HandlerBehaviorTests(unittest.TestCase):
                 """Reserved."""
                 return {}
 
+    def test_renamed_and_legacy_agent_loop_names_rejected(self) -> None:
+        # Hermes v0.22 intercepts todo_list and rewrites legacy names such as cronjob.
+        for name in ("todo_list", "cronjob", "tip"):
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "reserved"):
+                hpk.validate_tool_name(name)
+
     def test_reserved_core_namespace_prefix_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "reserved Hermes core namespace"):
             hpk.tool_name("memory", "write", "entry")
@@ -1211,7 +1217,7 @@ class MediaDeliveryContractTests(unittest.TestCase):
                 session_id="session-1",
                 platform="telegram",
             ),
-            "NO_REPLY",
+            "✅",
         )
         self.assertIsNone(
             hpk.transform_media_delivery_output(
@@ -1220,6 +1226,16 @@ class MediaDeliveryContractTests(unittest.TestCase):
                 platform="telegram",
             )
         )
+
+    def test_strip_media_mirror_lines_removes_only_whole_placeholder_lines(self) -> None:
+        self.assertEqual(
+            hpk.strip_media_mirror_lines("Here she is.\n\nMEDIA:/x.jpg\n[Sent voice message]\n"),
+            "Here she is.\n\nMEDIA:/x.jpg",
+        )
+        self.assertEqual(hpk.strip_media_mirror_lines("NO_REPLY\n[Sent image attachment]"), "✅")
+        self.assertEqual(hpk.strip_media_mirror_lines("[Sent 3 media attachments]"), "✅")
+        self.assertIsNone(hpk.strip_media_mirror_lines("I saw [Sent voice message] in the log"))
+        self.assertIsNone(hpk.strip_media_mirror_lines("hello"))
 
     def test_successful_delivery_does_not_suppress_another_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

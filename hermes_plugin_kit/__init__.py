@@ -94,6 +94,8 @@ __all__ = [
     "SessionDBCompatibilityError",
     "deliver_media",
     "resolve_delivery_target",
+    "MEDIA_DELIVERED_REPLY",
+    "strip_media_mirror_lines",
     "transform_media_delivery_output",
     "clear_media_delivery_state",
     "MediaType",
@@ -137,7 +139,11 @@ _REDACT_HINTS = ("token", "secret", "password", "passwd", "api_key", "apikey", "
 _MAX_LOG_CHARS = 200
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _COMMAND_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-_AGENT_LOOP_TOOL_NAMES = frozenset({"todo", "memory", "session_search", "delegate_task"})
+# Fallback for _agent_loop_tool_names() outside a Hermes host; matches v0.22.5.
+_AGENT_LOOP_TOOL_NAMES = frozenset({
+    "todo_list", "memory", "session_search", "delegate_task",
+    "todo", "cronjob", "process", "tour", "tip",
+})
 _RESERVED_NAMESPACE_PREFIXES = ("memory_",)
 _SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _HOST_TOOL_IMPORTS = {
@@ -704,6 +710,15 @@ class MediaDeliveryResult:
 # Tool naming
 # ---------------------------------------------------------------------------
 
+def _agent_loop_tool_names() -> frozenset[str]:
+    """Names Hermes intercepts or rewrites before registry dispatch, read from the host itself."""
+    try:
+        from model_tools import _AGENT_LOOP_TOOLS, _LEGACY_TOOL_ALIASES
+    except ImportError:  # not inside a Hermes host (unit tests, tooling)
+        return _AGENT_LOOP_TOOL_NAMES
+    return frozenset(_AGENT_LOOP_TOOLS) | frozenset(_LEGACY_TOOL_ALIASES)
+
+
 def validate_tool_name(name: str, *, namespace: str | None = None) -> str:
     """Validate a Hermes plugin tool name and return it unchanged.
 
@@ -717,7 +732,8 @@ def validate_tool_name(name: str, *, namespace: str | None = None) -> str:
         raise ValueError(
             f"tool name {name!r} must match {_TOOL_NAME_RE.pattern!r}"
         )
-    if name in _AGENT_LOOP_TOOL_NAMES:
+    reserved = _agent_loop_tool_names()
+    if name in reserved:
         raise ValueError(
             f"tool name {name!r} is reserved by the Hermes agent loop"
         )
@@ -731,7 +747,7 @@ def validate_tool_name(name: str, *, namespace: str | None = None) -> str:
             raise ValueError(
                 f"tool namespace {namespace!r} must match {_TOOL_NAME_RE.pattern!r}"
             )
-        if namespace in _AGENT_LOOP_TOOL_NAMES:
+        if namespace in reserved:
             raise ValueError(
                 f"tool namespace {namespace!r} is reserved by the Hermes agent loop"
             )
@@ -1856,6 +1872,31 @@ def _mark_media_delivery_success(context: dict[str, Any]) -> None:
     )
 
 
+# The turn's visible reply after the attachment itself was already sent.
+MEDIA_DELIVERED_REPLY = "✅"
+
+# Hermes' send_message records each media send as an assistant line so the model
+# remembers it (tools/send_message_tool.py _describe_media_for_mirror). Models copy
+# those lines into real replies, where the user receives them as text.
+_MEDIA_MIRROR_LINE = re.compile(
+    r"\[Sent (?:voice message|(?:image|video|audio|document) attachment|\d+ media attachments)\]"
+)
+
+
+def strip_media_mirror_lines(response_text: str) -> str | None:
+    """Remove whole lines that copy Hermes' sent-media history notes from a final reply.
+
+    Returns ``None`` when there is nothing to remove. A reply left empty, or holding
+    only ``NO_REPLY``, becomes :data:`MEDIA_DELIVERED_REPLY`: the note follows a send.
+    """
+    lines = str(response_text or "").splitlines()
+    kept = [line for line in lines if not _MEDIA_MIRROR_LINE.fullmatch(line.strip())]
+    if len(kept) == len(lines):
+        return None
+    rest = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    return MEDIA_DELIVERED_REPLY if rest in ("", "NO_REPLY") else rest
+
+
 def transform_media_delivery_output(
     response_text: str = "",
     session_id: str = "",
@@ -1865,8 +1906,10 @@ def transform_media_delivery_output(
 
     A successful :func:`deliver_media` call arms one task-local suppression.
     The finalizer then replaces any model-authored text or repeated ``MEDIA``
-    tag with Hermes' canonical ``NO_REPLY`` marker. State is consumed once, so
-    later turns in the same session are unaffected.
+    tag with :data:`MEDIA_DELIVERED_REPLY`. Not ``NO_REPLY``: Hermes v0.22+
+    rejects a silence marker on a turn that expects a reply and sends a
+    warning instead. State is consumed once, so later turns in the same
+    session are unaffected.
     """
     context_id = str(session_id or "").strip()
     if not context_id:
@@ -1881,7 +1924,7 @@ def transform_media_delivery_output(
         "event=media_final_response_suppressed original_chars=%d",
         len(str(response_text or "")),
     )
-    return "NO_REPLY"
+    return MEDIA_DELIVERED_REPLY
 
 
 def clear_media_delivery_state(
