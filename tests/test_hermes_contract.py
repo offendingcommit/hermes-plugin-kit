@@ -717,7 +717,6 @@ class HermesContractTests(unittest.TestCase):
         from model_tools import _AGENT_LOOP_TOOLS, _LEGACY_TOOL_ALIASES  # type: ignore
 
         host = frozenset(_AGENT_LOOP_TOOLS) | frozenset(_LEGACY_TOOL_ALIASES)
-        self.assertEqual(hpk._agent_loop_tool_names(), host)
         self.assertEqual(hpk._AGENT_LOOP_TOOL_NAMES, host)
 
     def test_host_tool_invocation_reaches_real_telegram_media_contract(self) -> None:

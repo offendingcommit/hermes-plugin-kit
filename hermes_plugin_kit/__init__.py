@@ -140,7 +140,11 @@ _REDACT_HINTS = ("token", "secret", "password", "passwd", "api_key", "apikey", "
 _MAX_LOG_CHARS = 200
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _COMMAND_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
-# Fallback for _agent_loop_tool_names() outside a Hermes host; matches v0.22.5.
+# Names Hermes intercepts or rewrites before registry dispatch (v0.22.5
+# model_tools._AGENT_LOOP_TOOLS | _LEGACY_TOOL_ALIASES). Never import the host to
+# read them: plugins register while model_tools is mid-import, from loader
+# threads, so that import deadlocks on the module lock. The contract lane pins
+# this copy to the deployed host instead.
 _AGENT_LOOP_TOOL_NAMES = frozenset({
     "todo_list", "memory", "session_search", "delegate_task",
     "todo", "cronjob", "process", "tour", "tip",
@@ -711,15 +715,6 @@ class MediaDeliveryResult:
 # Tool naming
 # ---------------------------------------------------------------------------
 
-def _agent_loop_tool_names() -> frozenset[str]:
-    """Names Hermes intercepts or rewrites before registry dispatch, read from the host itself."""
-    try:
-        from model_tools import _AGENT_LOOP_TOOLS, _LEGACY_TOOL_ALIASES
-    except ImportError:  # not inside a Hermes host (unit tests, tooling)
-        return _AGENT_LOOP_TOOL_NAMES
-    return frozenset(_AGENT_LOOP_TOOLS) | frozenset(_LEGACY_TOOL_ALIASES)
-
-
 def validate_tool_name(name: str, *, namespace: str | None = None) -> str:
     """Validate a Hermes plugin tool name and return it unchanged.
 
@@ -733,7 +728,7 @@ def validate_tool_name(name: str, *, namespace: str | None = None) -> str:
         raise ValueError(
             f"tool name {name!r} must match {_TOOL_NAME_RE.pattern!r}"
         )
-    reserved = _agent_loop_tool_names()
+    reserved = _AGENT_LOOP_TOOL_NAMES
     if name in reserved:
         raise ValueError(
             f"tool name {name!r} is reserved by the Hermes agent loop"

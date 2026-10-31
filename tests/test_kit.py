@@ -443,6 +443,28 @@ class HandlerBehaviorTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "reserved"):
                 hpk.validate_tool_name(name)
 
+    def test_tool_name_validation_never_imports_the_host(self) -> None:
+        # Hermes registers plugins from loader threads while model_tools is still
+        # importing; importing it here waits on that module lock until the 10 s
+        # plugin-load deadline, for every plugin (infra#1558).
+        class RefuseModelTools:
+            def find_spec(self, name, path=None, target=None):
+                if name == "model_tools":
+                    raise AssertionError("tool-name validation imported model_tools")
+                return None
+
+        blocker = RefuseModelTools()
+        saved = sys.modules.pop("model_tools", None)
+        sys.meta_path.insert(0, blocker)
+        try:
+            self.assertEqual(hpk.validate_tool_name("sample_read_note"), "sample_read_note")
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                hpk.validate_tool_name("todo_list")
+        finally:
+            sys.meta_path.remove(blocker)
+            if saved is not None:
+                sys.modules["model_tools"] = saved
+
     def test_reserved_core_namespace_prefix_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "reserved Hermes core namespace"):
             hpk.tool_name("memory", "write", "entry")
