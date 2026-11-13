@@ -1032,6 +1032,37 @@ class HermesPlatformContractTests(unittest.TestCase):
 
         self.assertFalse(self.host.registry.is_registered("hpk_contract_platform"))
 
+    def test_guard_reads_the_managers_scope_in_a_multiplexer(self) -> None:
+        import tempfile
+
+        home = tempfile.TemporaryDirectory()
+        self.addCleanup(home.cleanup)
+        mux = _REAL.PluginManager(scope_key=home.name)
+        registry = self.host.registry
+        self.assertNotEqual(mux.scope_key, registry.current_scope_key())
+
+        def context(name, manager):
+            manifest = _REAL.PluginManifest(name=name)
+            manifest.config = {"replace_platforms": []}
+            return _REAL.PluginContext(manifest, manager)
+
+        name = "hpk_contract_mux"
+        self._cleanup(name)
+        self.addCleanup(registry.unregister, name, scope=mux.scope_key)
+        hpk.register_plugin(context("other-plugin", self.manager), [self._adapter(name)])
+        home_entry = registry.snapshot_registration(name, scope=self.scope)[0]
+
+        # Another profile owns the name under HERMES_HOME's scope; this one does not.
+        hpk.register_plugin(context("contract-plugin", mux), [self._adapter(name)])
+        mux_entry = registry.snapshot_registration(name, scope=mux.scope_key)[0]
+        self.assertEqual(mux_entry.plugin_name, "contract-plugin")
+        self.assertIs(registry.snapshot_registration(name, scope=self.scope)[0], home_entry)
+
+        # A third plugin in the multiplexed profile meets the owner there.
+        with self.assertRaisesRegex(ValueError, "contract-plugin"):
+            hpk.register_plugin(context("third-plugin", mux), [self._adapter(name)])
+        self.assertIs(registry.snapshot_registration(name, scope=mux.scope_key)[0], mux_entry)
+
     def test_host_refusal_rolls_back_through_the_real_registry(self) -> None:
         self._cleanup("hpk_contract_a", "telegram", "zz_hpk_contract")
         self.manifest.config = {"replace_platforms": ["telegram"]}
@@ -1080,7 +1111,9 @@ class HermesPlatformContractTests(unittest.TestCase):
         self.assertTrue({"source", "plugin_name", "trusted_inbound"} <= entry_fields)
 
         registry_cls = module.PlatformRegistry
-        inspect.signature(registry_cls.is_registered).bind(None, "x")
+        # The guard reads the scope Hermes' register_platform writes to.
+        self.assertIs(self.ctx._manager, self.manager)
+        self.assertIsInstance(self.manager.scope_key, str)
         inspect.signature(registry_cls.snapshot_registration).bind(None, "x", scope="s")
         self.assertIsInstance(
             inspect.getattr_static(registry_cls, "current_scope_key"), staticmethod

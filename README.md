@@ -800,7 +800,10 @@ def register(ctx):
 `register_plugin` checks every name against the running host's own
 `PlatformEntry` before anything registers. An unknown option fails registration;
 one listed in `optional_options` is dropped on a host that lacks it and logged
-by name. `source` and `plugin_name` belong to the host and are refused.
+by name. Access-policy options (`trusted_inbound`, `allowed_users_env`,
+`allow_all_env`, `allow_bots_env`, `own_policy_env`, `group_allowed_chats_env`,
+`allowlist_suppresses_pairing`) cannot be optional: losing one would change who
+can reach the agent. `source` and `plugin_name` belong to the host and are refused.
 `trusted_inbound` is never set unless you pass it, and is refused on any
 platform Hermes ships.
 

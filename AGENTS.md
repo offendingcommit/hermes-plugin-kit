@@ -75,8 +75,10 @@ plugin.
 - Register gateway platforms with `@platform` on a `BasePlatformAdapter`
   subclass through `register_plugin`. Check options against the host's own
   `PlatformEntry`, never a kit-owned field list; read platform existence with
-  `core_ships_platform`, `is_registered` and `snapshot_registration`, never
-  `PlatformRegistry.get`, which imports deferred SDKs. Replacing an existing
+  `core_ships_platform` and `snapshot_registration` under the plugin manager's
+  scope (the one Hermes writes to) plus the global scope, never
+  `PlatformRegistry.get`, which imports deferred SDKs. Access-policy options
+  are never optional. Replacing an existing
   platform stays operator-gated through `plugins.<name>.replace_platforms`, and
   a host refusal must dispose this call's earlier platform handles.
 - Redact secret-looking values in logs and avoid logging full untrusted payloads.

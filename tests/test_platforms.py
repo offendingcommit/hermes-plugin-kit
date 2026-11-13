@@ -29,18 +29,20 @@ class _FakeRegistry:
     """Stand-in for the host's PlatformRegistry: concrete and deferred state."""
 
     def __init__(self) -> None:
+        # entries/deferred are the global (scope=None) maps; scoped holds the
+        # entries registered under a profile's scope key.
         self.entries: dict[str, object] = {}
         self.deferred: dict[str, object] = {}
+        self.scoped: dict[str, dict[str, object]] = {}
 
     @staticmethod
     def current_scope_key() -> str:
         return "<home>"
 
-    def is_registered(self, name: str) -> bool:
-        return name in self.entries or name in self.deferred
-
     def snapshot_registration(self, name: str, *, scope=None):
-        return self.entries.get(name), self.deferred.get(name)
+        if scope is None:
+            return self.entries.get(name), self.deferred.get(name)
+        return self.scoped.get(scope, {}).get(name), None
 
     def get(self, name: str):
         # Like the host, resolving a deferred name runs its loader, which
@@ -159,6 +161,19 @@ class RecordingCaptureLogs:
 
 
 class PlatformAnnotationTests(unittest.TestCase):
+    def test_access_policy_options_cannot_be_optional(self) -> None:
+        for option in (
+            "trusted_inbound", "allowed_users_env", "allow_all_env", "allow_bots_env",
+            "own_policy_env", "group_allowed_chats_env", "allowlist_suppresses_pairing",
+        ):
+            with self.subTest(option=option):
+                with self.assertRaisesRegex(ValueError, f"access-policy.*{option}"):
+                    hpk.platform(
+                        "web_chat", label="Chat", check=_check,
+                        options={option: "X", "emoji": "x"},
+                        optional_options={option, "emoji"},
+                    )
+
     """Decoration-time behavior: what needs no Hermes host to judge."""
 
     def test_annotation_returns_the_same_class_carrying_its_spec(self) -> None:
@@ -485,6 +500,39 @@ class PlatformReplacementGuardTests(unittest.TestCase):
             host.registry.entries["web_chat"] = types.SimpleNamespace(
                 source="plugin", plugin_name="other-plugin"
             )
+            ctx = RecordingPluginContext()
+            with self.assertRaisesRegex(ValueError, "other-plugin"):
+                _register(ctx, self._module_with(host, "web_chat"))
+
+        self.assertNothingRegistered(ctx)
+
+    def test_guard_reads_the_scope_hermes_writes_to(self) -> None:
+        other = types.SimpleNamespace(source="plugin", plugin_name="other-plugin")
+        with fake_platform_host() as host:
+            # Another profile in the same process owns the name under HERMES_HOME's scope.
+            host.registry.scoped["<home>"] = {"web_chat": other}
+            ctx = RecordingPluginContext()
+            ctx._manager = types.SimpleNamespace(scope_key="<profile-b>")
+            summary, _ = _register(ctx, self._module_with(host, "web_chat"))
+
+        self.assertEqual(summary.platforms, ("web_chat",))
+        self.assertEqual(summary.replaced_platforms, ())
+
+    def test_guard_refuses_an_owner_in_the_managers_scope(self) -> None:
+        other = types.SimpleNamespace(source="plugin", plugin_name="other-plugin")
+        with fake_platform_host() as host:
+            host.registry.scoped["<profile-b>"] = {"web_chat": other}
+            ctx = RecordingPluginContext()
+            ctx._manager = types.SimpleNamespace(scope_key="<profile-b>")
+            with self.assertRaisesRegex(ValueError, "other-plugin"):
+                _register(ctx, self._module_with(host, "web_chat"))
+
+        self.assertNothingRegistered(ctx)
+
+    def test_guard_falls_back_to_the_current_scope_without_a_manager(self) -> None:
+        other = types.SimpleNamespace(source="plugin", plugin_name="other-plugin")
+        with fake_platform_host() as host:
+            host.registry.scoped["<home>"] = {"web_chat": other}
             ctx = RecordingPluginContext()
             with self.assertRaisesRegex(ValueError, "other-plugin"):
                 _register(ctx, self._module_with(host, "web_chat"))

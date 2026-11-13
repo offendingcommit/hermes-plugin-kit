@@ -113,8 +113,9 @@ the same operations with `@tool` shadows the active-context-aware dispatch.
   unless the operator lists it in `plugins.<name>.replace_platforms`; setting it
   from plugin code is not possible by design.
 - `optional_options` lets a platform register without an option on an older
-  host. Do not list an access-policy option (`allowed_users_env`,
-  `group_allowed_chats_env`) there unless losing it is acceptable.
+  host. Access-policy options (`trusted_inbound`, `allowed_users_env`,
+  `allow_all_env`, `allow_bots_env`, `own_policy_env`,
+  `group_allowed_chats_env`, `allowlist_suppresses_pairing`) are refused there.
 - Bundled platforms load as deferred loaders. The kit checks for them without
   importing their SDKs; never call `PlatformRegistry.get` just to test a name.
 - Replaying a recorded `register_platform` call needs

@@ -145,8 +145,15 @@ _HOST_OWNED_PLATFORM_OPTIONS = frozenset({"source", "plugin_name"})
 # Host reads the replacement guard needs; checked together so a host missing
 # any of them names every gap at once.
 _PLATFORM_EXISTENCE_SYMBOLS = (
-    "core_ships_platform", "is_registered", "snapshot_registration", "current_scope_key",
+    "core_ships_platform", "snapshot_registration", "current_scope_key",
 )
+# PlatformEntry fields that decide who can reach the agent. Dropping one on an
+# older host would silently change that, so none may be optional. Hermes tags
+# no field as policy, so the kit keeps this list.
+_ACCESS_POLICY_PLATFORM_OPTIONS = frozenset({
+    "trusted_inbound", "allowed_users_env", "allow_all_env", "allow_bots_env",
+    "own_policy_env", "group_allowed_chats_env", "allowlist_suppresses_pairing",
+})
 _NAMED_PLATFORM_OPTIONS = frozenset({
     "name", "label", "adapter_factory", "check_fn",
     "validate_config", "required_env", "install_hint",
@@ -1331,6 +1338,12 @@ def platform(
         raise ValueError(
             "optional_options must name passed options; not passed: "
             + ", ".join(not_passed)
+        )
+    policy = sorted(optional & _ACCESS_POLICY_PLATFORM_OPTIONS)
+    if policy:
+        raise ValueError(
+            "access-policy options cannot be optional; dropping one on an older "
+            "Hermes would change who can reach the agent: " + ", ".join(policy)
         )
     spec = {
         "name": name,
@@ -2633,6 +2646,11 @@ def _preflight_platforms(
     reads = _platform_existence_reads(registry_module)
     allowed_replacements = _replace_platforms_setting(ctx, plugin_name)
     manifest_name = getattr(getattr(ctx, "manifest", None), "name", None)
+    # Read the scope Hermes' register_platform writes to: its plugin manager's.
+    # In a multiplexer that can differ from HERMES_HOME's current_scope_key().
+    scope = getattr(getattr(ctx, "_manager", None), "scope_key", None)
+    if not isinstance(scope, str) or not scope:
+        scope = reads["current_scope_key"]()
     prepared: list[dict[str, Any]] = []
     replaced: list[str] = []
     for name in sorted(platforms):
@@ -2665,10 +2683,11 @@ def _preflight_platforms(
                 f"platform {name!r}: trusted_inbound cannot be set on a platform "
                 "Hermes ships; it would waive allowlists and pairing"
             )
-        if core or reads["is_registered"](name):
-            entry, loader = reads["snapshot_registration"](
-                name, scope=reads["current_scope_key"]()
-            )
+        scoped = reads["snapshot_registration"](name, scope=scope)
+        shared = reads["snapshot_registration"](name, scope=None)
+        entry = scoped[0] if scoped[0] is not None else shared[0]
+        loader = scoped[1] if scoped[1] is not None else shared[1]
+        if core or entry is not None or loader is not None:
             own_reload = (
                 not core
                 and entry is not None
