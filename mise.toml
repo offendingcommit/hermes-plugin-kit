@@ -6,9 +6,51 @@ min_version = "2026.10.18"
 # drop it when DEPLOYED_HERMES_REVISION moves to v0.22.5 or later.
 python = ["3.14.9", "3.13.14"]
 uv = "0.13.5"
-just = "1.59.0"
 
 [env]
 # uv must run on mise's Python, never on one it manages or downloads itself.
 UV_PYTHON_PREFERENCE = "only-system"
 UV_PYTHON_DOWNLOADS = "never"
+# Overridable tool and checkout locations the tasks read; an exported value wins.
+UV = "{{ get_env(name='UV', default='uv') }}"
+OPENSPEC = "{{ get_env(name='OPENSPEC', default='openspec') }}"
+OPENSPEC_MIN = "1.13.1"
+HERMES_AGENT_REPO = "{{ get_env(name='HERMES_AGENT_REPO', default='https://github.com/NousResearch/hermes-agent.git') }}"
+HERMES_PINNED_DIR = "{{ get_env(name='HERMES_PINNED_DIR', default='.hermes-agent-pinned') }}"
+HERMES_UPSTREAM_DIR = "{{ get_env(name='HERMES_UPSTREAM_DIR', default='.hermes-agent-upstream') }}"
+HERMES_PINNED_VENV = "{{ get_env(name='HERMES_PINNED_VENV', default='.hermes-venv-pinned') }}"
+HERMES_UPSTREAM_VENV = "{{ get_env(name='HERMES_UPSTREAM_VENV', default='.hermes-venv-upstream') }}"
+
+# One-line tasks live here; longer scripts are file tasks in mise-tasks/.
+# `mise tasks ls` lists them all.
+[tasks.install]
+description = "Create or sync the uv-managed environment"
+run = '"$UV" sync'
+
+[tasks.test]
+description = "Run the full unittest suite"
+run = '"$UV" run python -m unittest discover -s tests'
+
+[tasks.test-one]
+description = "Run one unittest by dotted test name"
+usage = 'arg "<test_name>"'
+run = '"$UV" run python -m unittest "$usage_test_name"'
+
+[tasks.test-release]
+description = "Run deterministic release intent, identity, and workflow contracts"
+run = '"$UV" run python -m unittest tests.test_release_contract -v'
+
+[tasks.build]
+description = "Build the wheel and source distribution"
+run = ['rm -rf dist', '"$UV" build']
+
+[tasks.check-dist]
+description = "Validate wheel and source-distribution metadata"
+run = '"$UV" run twine check dist/*'
+
+[tasks.clean]
+description = "Remove Python caches and build artifacts"
+run = [
+  'find . -type d -name __pycache__ -prune -exec rm -rf {} +',
+  'rm -rf .pytest_cache .coverage htmlcov dist build *.egg-info',
+]

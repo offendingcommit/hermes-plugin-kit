@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#MISE description="Check out hermes-agent at a given ref, in a directory of its own"
+#MISE hide=true
+#USAGE arg "<ref>"
+#USAGE arg "<dir>"
+# Each ref gets its own directory. Sharing one meant a pinned checkout left a
+# detached HEAD behind, and the next upstream run's `pull --ff-only || true`
+# swallowed the resulting error -- so it silently re-tested the pin while
+# reporting upstream.
+set -euo pipefail
+ref="$usage_ref"
+dir="$usage_dir"
+if [[ -d "$dir/.git" ]]; then
+  git -C "$dir" fetch -q --depth 1 origin "$ref"
+else
+  echo "Cloning hermes-agent into $dir"
+  git init -q "$dir"
+  git -C "$dir" remote add origin "$HERMES_AGENT_REPO"
+  git -C "$dir" fetch -q --depth 1 origin "$ref"
+fi
+git -C "$dir" checkout -q FETCH_HEAD
+echo "hermes-agent at $(git -C "$dir" rev-parse HEAD)"

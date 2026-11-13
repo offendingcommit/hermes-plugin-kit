@@ -57,7 +57,7 @@ jobs:
         env:
           HERMES_AGENT_PATH: ${{ github.workspace }}/.hermes-agent-upstream
         run: |
-          just test-contract-upstream > contract.log 2>&1
+          mise run test-contract-upstream > contract.log 2>&1
           echo "EXIT=$?" >> contract.log
         continue-on-error: true
       # `outcome` is the result before continue-on-error is applied;

@@ -3,7 +3,7 @@
 The two contract modules used to resolve a Hermes checkout differently, and
 both ways could report success without checking anything.
 
-`test_hermes_contract` auto-discovered `~/hermes-agent`, so a bare `just test`
+`test_hermes_contract` auto-discovered `~/hermes-agent`, so a bare `mise run test`
 silently exercised whatever branch a developer happened to have checked out,
 while CI — which checks out nothing — skipped the module entirely. The same
 command meant two different things. `test_context_engine_contract` was env-only
@@ -19,7 +19,7 @@ Both are replaced by one policy:
 
 That last rule is what lets the guard exist at all. A test outside
 ``skipUnless`` cannot otherwise tell an intended contract run from an ordinary
-``just test``: without the signal it would either redden every push — the
+``mise run test``: without the signal it would either redden every push — the
 blocking job checks out no Hermes revision and discovers both contract modules
 — or never fire, leaving the honest-receipt requirement unenforced.
 """

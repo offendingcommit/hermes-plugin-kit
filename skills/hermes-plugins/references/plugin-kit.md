@@ -124,9 +124,9 @@ the same operations with `@tool` shadows the active-context-aware dispatch.
 In this repository:
 
 ```bash
-just install
-just test
-just test-contract-pinned      # full contract suite at the deployed pin
+mise run install
+mise run test
+mise run test-contract-pinned      # full contract suite at the deployed pin
 ```
 
 In a consumer, run its native suite plus registration and manifest-parity

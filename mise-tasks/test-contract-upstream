@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+#MISE description="Run the full contract suite against upstream main -- the drift lane"
+#MISE alias="test-contract"
+set -euo pipefail
+dir="${HERMES_AGENT_PATH:-$HERMES_UPSTREAM_DIR}"
+if [[ -z "${HERMES_AGENT_PATH:-}" ]]; then
+  mise run prepare-hermes-ref main "$HERMES_UPSTREAM_DIR"
+fi
+rev="$(git -C "$dir" rev-parse HEAD)"
+mise run provision-hermes-host "$dir" "$HERMES_UPSTREAM_VENV"
+HERMES_CONTRACT_REQUIRED=1 HERMES_AGENT_PATH="$(cd "$dir" && pwd)" \
+  mise run run-contract-suite "upstream $rev" "$HERMES_UPSTREAM_VENV"
