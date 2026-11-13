@@ -941,5 +941,165 @@ class HermesContractTests(unittest.TestCase):
         self.assertIn(str(Path("assets") / "logo.png"), linked["assets"])
 
 
+
+def _platform_host():
+    """The pinned host's platform registry, base adapter and registration handle."""
+    from gateway import platform_registry as registry_module  # type: ignore
+    from gateway.platforms.base import BasePlatformAdapter  # type: ignore
+    from hermes_cli.plugins_ledger import PluginRegistration  # type: ignore
+
+    return types.SimpleNamespace(
+        module=registry_module,
+        registry=registry_module.platform_registry,
+        BasePlatformAdapter=BasePlatformAdapter,
+        PluginRegistration=PluginRegistration,
+    )
+
+
+@unittest.skipUnless(_REAL is not None, "hermes-agent source not importable")
+class HermesPlatformContractTests(unittest.TestCase):
+    """@platform against the real pinned PluginContext and platform registry."""
+
+    def setUp(self) -> None:
+        self.host = _platform_host()
+        self.manager = _REAL.PluginManager()
+        self.manifest = _REAL.PluginManifest(name="contract-plugin")
+        # A non-empty config keeps load_plugin_config from reading the machine's
+        # own Hermes config.
+        self.manifest.config = {"replace_platforms": []}
+        self.ctx = _REAL.PluginContext(self.manifest, self.manager)
+        self.scope = self.manager.scope_key
+
+    def _adapter(self, name, **kwargs):
+        base = self.host.BasePlatformAdapter
+
+        @hpk.platform(name, label="Contract Chat", check=_platform_check, **kwargs)
+        class ContractAdapter(base):
+            async def connect(self, *, is_reconnect=False):
+                return True
+
+            async def disconnect(self):
+                return None
+
+            async def send(self, chat_id, content, reply_to=None, metadata=None):
+                return None
+
+            async def get_chat_info(self, chat_id):
+                return {"name": chat_id}
+
+        return ContractAdapter
+
+    def _snapshot(self, name):
+        return self.host.registry.snapshot_registration(name, scope=self.scope)
+
+    def _cleanup(self, *names):
+        for name in names:
+            self.addCleanup(self.host.registry.unregister, name, scope=self.scope)
+
+    def test_registers_a_platform_entry_in_the_real_registry(self) -> None:
+        self._cleanup("hpk_contract_platform")
+        adapter = self._adapter("hpk_contract_platform", options={"emoji": "*"})
+
+        summary = hpk.register_plugin(self.ctx, [adapter])
+
+        entry, loader = self._snapshot("hpk_contract_platform")
+        self.assertEqual(summary.platforms, ("hpk_contract_platform",))
+        self.assertIsNotNone(entry)
+        self.assertIsNone(loader)
+        self.assertEqual(entry.label, "Contract Chat")
+        self.assertIs(entry.check_fn, _platform_check)
+        self.assertIs(entry.adapter_factory, adapter)
+        self.assertEqual(entry.emoji, "*")
+        self.assertEqual(entry.plugin_name, "contract-plugin")
+
+    def test_core_platform_without_override_leaves_the_registry_unchanged(self) -> None:
+        before = self._snapshot("telegram")
+
+        with self.assertRaisesRegex(ValueError, "plugins.contract-plugin.replace_platforms"):
+            hpk.register_plugin(self.ctx, [self._adapter("telegram")])
+
+        after = self._snapshot("telegram")
+        self.assertIs(after[0], before[0])
+        self.assertIs(after[1], before[1])
+
+    def test_option_the_pinned_entry_lacks_leaves_the_registry_unchanged(self) -> None:
+        adapter = self._adapter(
+            "hpk_contract_platform", options={"hpk_not_a_platform_field": 1}
+        )
+
+        with self.assertRaisesRegex(ValueError, "hpk_not_a_platform_field"):
+            hpk.register_plugin(self.ctx, [adapter])
+
+        self.assertFalse(self.host.registry.is_registered("hpk_contract_platform"))
+
+    def test_host_refusal_rolls_back_through_the_real_registry(self) -> None:
+        self._cleanup("hpk_contract_a", "telegram", "zz_hpk_contract")
+        self.manifest.config = {"replace_platforms": ["telegram"]}
+        before = {name: self._snapshot(name) for name in ("hpk_contract_a", "telegram")}
+        registry = self.host.registry
+        original = registry.register
+        skipped = []
+
+        def register(entry, *, scope=None):
+            if entry.name == "zz_hpk_contract":
+                skipped.append(entry.name)  # store nothing: the host then returns None
+                return None
+            return original(entry, scope=scope)
+
+        with patch.object(registry, "register", register):
+            with self.assertRaisesRegex(RuntimeError, "zz_hpk_contract"):
+                hpk.register_plugin(
+                    self.ctx,
+                    [
+                        self._adapter("hpk_contract_a"),
+                        self._adapter("telegram"),
+                        self._adapter("zz_hpk_contract"),
+                    ],
+                )
+
+        self.assertEqual(skipped, ["zz_hpk_contract"])
+        for name, (entry, loader) in before.items():
+            with self.subTest(platform=name):
+                after = self._snapshot(name)
+                self.assertIs(after[0], entry)
+                self.assertIs(after[1], loader)
+
+    def test_every_host_symbol_the_preflight_uses_accepts_the_kits_call(self) -> None:
+        sig = inspect.signature(_REAL.PluginContext.register_platform)
+        sig.bind(
+            None,
+            name="hpk_contract_platform", label="Contract Chat",
+            adapter_factory=object, check_fn=_platform_check,
+            validate_config=None, required_env=[], install_hint="", emoji="*",
+        )
+
+        module = self.host.module
+        import dataclasses
+
+        entry_fields = {f.name for f in dataclasses.fields(module.PlatformEntry)}
+        self.assertTrue({"source", "plugin_name", "trusted_inbound"} <= entry_fields)
+
+        registry_cls = module.PlatformRegistry
+        inspect.signature(registry_cls.is_registered).bind(None, "x")
+        inspect.signature(registry_cls.snapshot_registration).bind(None, "x", scope="s")
+        self.assertIsInstance(
+            inspect.getattr_static(registry_cls, "current_scope_key"), staticmethod
+        )
+        inspect.signature(registry_cls.current_scope_key).bind()
+        inspect.signature(module.core_ships_platform).bind("x")
+        self.assertTrue(module.core_ships_platform("telegram"))
+        for symbol in hpk._PLATFORM_EXISTENCE_SYMBOLS:
+            owner = module if symbol == "core_ships_platform" else self.host.registry
+            self.assertTrue(callable(getattr(owner, symbol, None)), symbol)
+
+        adapter = self._adapter("hpk_contract_platform")
+        self.assertTrue(issubclass(adapter, self.host.BasePlatformAdapter))
+        self.assertFalse(inspect.isabstract(adapter))
+        inspect.signature(self.host.PluginRegistration.dispose).bind(None)
+
+
+def _platform_check() -> bool:
+    return True
+
 if __name__ == "__main__":
     unittest.main()
