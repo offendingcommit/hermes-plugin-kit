@@ -709,6 +709,23 @@ Image and video providers run through the general `PluginContext`. The kit does
 not decorate provider methods or replace the `MemoryProvider`,
 `ImageGenProvider`, or `VideoGenProvider` contracts.
 
+Providers have no declaration decorator, by design. `@tool`, `@hook` and
+`@platform` declare something the host calls or constructs; a provider is one
+stateful instance the plugin builds, often only when a runtime policy allows
+it. Make that choice in `register()`, where the policy is already evaluated for
+the plugin's other surfaces:
+
+```python
+providers = () if policy.read_only else (MyMemoryProvider(),)
+return register_plugin(ctx, declarations, memory_providers=providers)
+```
+
+A decorator would have to construct the instance itself, assuming a
+no-argument constructor, and would add a second activation gate beside the one
+the plugin already runs. The tuple keeps construction explicit and one instance
+per registration, and gets the same name validation and `RegistrationSummary`
+fields.
+
 Context engines likewise remain instances of Hermes' `ContextEngine` ABC, but
 are singular rather than a provider collection. Their native schemas and
 `handle_tool_call` own recovery-tool dispatch.
