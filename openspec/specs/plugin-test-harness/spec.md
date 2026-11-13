@@ -61,6 +61,21 @@ signatures wherever a Hermes checkout is importable.
 - **THEN** the replay reports clean and the recorded registration is available
   for assertion
 
+#### Scenario: Host removes a platform option
+
+- **WHEN** a plugin registers a platform with an option the host's
+  `PlatformEntry` no longer has, and the replay is given the host's
+  `PlatformEntry` field names
+- **THEN** the replay fails and names `register_platform` and the missing
+  option, even though the call still binds to the registrar's signature
+
+#### Scenario: Platform options cannot be checked
+
+- **WHEN** a plugin registers a platform and the replay is not given the host's
+  `PlatformEntry` field names
+- **THEN** the replay reports the run as not checked rather than clean, and
+  still names any signature drift it found
+
 ### Requirement: Absent host is reported, never assumed clean
 
 The harness SHALL remain usable with no Hermes checkout present, and a run that
