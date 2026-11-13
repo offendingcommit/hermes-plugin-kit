@@ -1755,7 +1755,8 @@ class RegisterPluginTests(unittest.TestCase):
             "memory_providers=<none>; "
             "image_gen_providers=<none>; video_gen_providers=<none>; "
             "capabilities=image,video; context_engine=<none>; "
-            "context_engine_registration=<none>",
+            "context_engine_registration=<none>; "
+            "platforms=<none>; replaced_platforms=<none>",
         )
 
     def test_register_plugin_reports_selected_capabilities(self) -> None:

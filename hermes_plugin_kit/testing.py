@@ -72,6 +72,8 @@ RECEIPT_FIELD_ORDER: tuple[str, ...] = (
     "capabilities",
     "context_engine",
     "context_engine_registration",
+    "platforms",
+    "replaced_platforms",
 )
 
 #: The hermes-agent revision this kit's contract lanes are pinned to.
@@ -107,7 +109,23 @@ _ALL_REGISTRARS = (
     "register_image_gen_provider",
     "register_video_gen_provider",
     "register_context_engine",
+    "register_platform",
 )
+
+
+class _RecordedRegistration:
+    """What the recording host's ``register_platform`` returns: a disposable handle,
+    shaped like the host's ``PluginRegistration`` (``active`` and ``dispose()``)."""
+
+    def __init__(self, release: Callable[[], None]) -> None:
+        self._release = release
+        self.active = True
+
+    def dispose(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        self._release()
 
 
 @dataclass(frozen=True)
@@ -219,6 +237,9 @@ class RecordingPluginContext:
       prove the retry stays narrow and does not swallow an unrelated error.
     - ``missing_registrars`` -- omit a registrar entirely, which is how a host
       predating a surface behaves.
+    - ``refuse_platforms`` -- platform names ``register_platform`` refuses by
+      returning ``None``, the way the host reports a registration that did not
+      take. Accepted platforms return a handle whose ``dispose()`` removes them.
     """
 
     def __init__(
@@ -232,6 +253,7 @@ class RecordingPluginContext:
         missing_registrars: Iterable[str] = (),
         strict_against: type | None = None,
         context_engine_result: bool = True,
+        refuse_platforms: Iterable[str] = (),
     ) -> None:
         unknown = sorted(set(missing_registrars) - set(_ALL_REGISTRARS))
         if unknown:
@@ -253,8 +275,10 @@ class RecordingPluginContext:
         self.image_gen_providers: list[Any] = []
         self.video_gen_providers: list[Any] = []
         self.context_engines: list[Any] = []
+        self.platforms: list[dict[str, Any]] = []
 
         self.context_engine_result = context_engine_result
+        self.refuse_platforms = frozenset(refuse_platforms)
         self.subagent_lifecycle = SimpleNamespace(
             launch=lambda request: request,
             status=lambda handle: handle,
@@ -371,6 +395,29 @@ class RecordingPluginContext:
             self.context_engines.append(engine)
             return self.context_engine_result
 
+        def register_platform(
+            name, label, adapter_factory, check_fn, validate_config=None,
+            required_env=None, install_hint="", **entry_kwargs,
+        ):
+            kwargs = dict(
+                name=name, label=label, adapter_factory=adapter_factory,
+                check_fn=check_fn, validate_config=validate_config,
+                required_env=required_env, install_hint=install_hint, **entry_kwargs,
+            )
+            self._record("register_platform", (), kwargs)
+            if name in self.refuse_platforms:
+                return None
+            self.platforms.append(kwargs)
+
+            def release() -> None:
+                # By identity: two equal option dicts are still two registrations.
+                for i, registered in enumerate(self.platforms):
+                    if registered is kwargs:
+                        del self.platforms[i]
+                        return
+
+            return _RecordedRegistration(release)
+
         def _pick_skill_registrar() -> Callable[..., Any]:
             # Order matters: a raising host outranks the probe shapes, since a
             # test asking for an error wants it regardless of the keyword.
@@ -393,6 +440,7 @@ class RecordingPluginContext:
             "register_image_gen_provider": register_image_gen_provider,
             "register_video_gen_provider": register_video_gen_provider,
             "register_context_engine": register_context_engine,
+            "register_platform": register_platform,
         }
 
         for registrar, impl in implementations.items():
