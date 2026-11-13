@@ -21,7 +21,7 @@ jobs:
           # the action still verifies it against mise's signed checksums.
           version: "2026.10.18"
       - name: Run unittest suite
-        run: just test
+        run: mise run test
 
   package:
     runs-on: ubuntu-latest
@@ -35,13 +35,13 @@ jobs:
           version: "2026.10.18"
       - name: Build and validate package metadata
         run: |
-          just build
-          just check-dist
+          mise run build
+          mise run check-dist
       # `twine check` reads metadata and never opens the archive, so it passes
       # on a wheel that is missing a module entirely. Installing and importing
       # is the only thing that catches that.
       - name: Prove the public surface imports from the installed wheel
-        run: just check-install
+        run: mise run check-install
 
   # Amber admission gates on the exact deployed Hermes fork contract. Keep the
   # immutable revision aligned with infra's candidate image/source receipt.
@@ -74,4 +74,4 @@ jobs:
         run: |
           test "$(git -C "$HERMES_AGENT_PATH" rev-parse HEAD)" = \
             "$DEPLOYED_HERMES_REVISION"
-          just test-contract-pinned
+          mise run test-contract-pinned

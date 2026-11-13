@@ -450,6 +450,8 @@ visible in container logs without forcing verbose plugin logging everywhere.
 `log_registration_summary(logger, plugin_name, summary)` helper. The receipt
 uses the Hermes manifest name when available and lists the actual registered
 command, tool, middleware, hook, and skill names, plus skipped optional skills.
+Platform fields (`platforms`, `replaced_platforms`) come last, after every
+older field, so position-based parsers keep reading the fields they knew.
 Runtime-gated consumers should pass their active decorated declarations to
 `register_plugin`; a truly custom registration path can call the same helper
 with its own `RegistrationSummary` instead of inventing a second receipt
@@ -760,6 +762,67 @@ and `send_voice` with the expected files, without separate text messages. It
 also runs the kit-owned spoiler extension against Hermes' real config, session,
 async bridge, and Telegram library shapes while mocking only Bot network calls.
 
+## Gateway platforms
+
+A plugin that adds a messaging channel annotates its adapter class with
+`@platform` and passes it to `register_plugin` like any other declaration. The
+class must subclass Hermes' `BasePlatformAdapter`; it is registered as-is and
+becomes the `adapter_factory` Hermes calls with the platform config. Follow
+Hermes' own adapter guide (`website/docs/developer-guide/adding-platform-adapters.md`)
+for the adapter itself.
+
+```python
+from gateway.platforms.base import BasePlatformAdapter
+from hermes_plugin_kit import platform, register_plugin
+
+
+def web_chat_ready() -> bool:  # passive: report whether dependencies import
+    return True
+
+
+@platform(
+    "web_chat",
+    label="Web Chat",
+    check=web_chat_ready,
+    required_env=["WEB_CHAT_TOKEN"],
+    options={"emoji": "💬", "display_tier": "minimal"},
+    optional_options={"display_tier"},
+)
+class WebChatAdapter(BasePlatformAdapter):
+    ...
+
+
+def register(ctx):
+    return register_plugin(ctx, [WebChatAdapter])
+```
+
+`options` passes further `PlatformEntry` fields through unchanged, and
+`register_plugin` checks every name against the running host's own
+`PlatformEntry` before anything registers. An unknown option fails registration;
+one listed in `optional_options` is dropped on a host that lacks it and logged
+by name. Access-policy options (`trusted_inbound`, `allowed_users_env`,
+`allow_all_env`, `allow_bots_env`, `own_policy_env`, `group_allowed_chats_env`,
+`allowlist_suppresses_pairing`) cannot be optional: losing one would change who
+can reach the agent. `source` and `plugin_name` belong to the host and are refused.
+`trusted_inbound` is never set unless you pass it, and is refused on any
+platform Hermes ships.
+
+Replacing a platform that already exists, one Hermes ships or one already
+registered, fails loudly. Only the operator can allow it, by naming the
+platform in the plugin's config:
+
+```yaml
+plugins:
+  my-plugin:
+    replace_platforms: [telegram]
+```
+
+A reload of the plugin's own platform needs no entry, except for a platform
+Hermes ships. If Hermes refuses a registration (`register_platform` returns
+`None`), `register_plugin` disposes the platforms it already registered in that
+call and raises, so a refused plugin leaves no platform behind. The receipt
+names `platforms` and `replaced_platforms`.
+
 ## Agent skill
 
 The repo owns a Hermes plugin authoring skill at
@@ -867,9 +930,9 @@ so the linked directory is self-contained.
 
 ## Development
 
-Uses [mise](https://mise.jdx.dev/) to install the pinned Python,
-[uv](https://docs.astral.sh/uv/) and [Just](https://github.com/casey/just)
-from `mise.toml` and `mise.lock`, the same toolchain CI installs. Once per
+Uses [mise](https://mise.jdx.dev/) to install the pinned Python and
+[uv](https://docs.astral.sh/uv/) from `mise.toml` and `mise.lock`, the same
+toolchain CI installs, and to run the project's tasks. Once per
 checkout:
 
 ```bash
@@ -879,13 +942,13 @@ mise trust && mise install --locked
 Then:
 
 ```bash
-just install      # uv sync — create/sync the dev environment
-just test         # uv run python -m unittest discover -s tests
-just test-one tests.test_kit.SchemaConventionTests
-just test-release # release intent, artifact identity, and workflow contracts
-just test-contract # real upstream Hermes contract
-just build        # uv build — wheel + sdist
-just check-dist   # validate wheel/sdist metadata with twine
+mise run install      # uv sync — create/sync the dev environment
+mise run test         # uv run python -m unittest discover -s tests
+mise run test-one tests.test_kit.SchemaConventionTests
+mise run test-release # release intent, artifact identity, and workflow contracts
+mise run test-contract # real upstream Hermes contract
+mise run build        # uv build — wheel + sdist
+mise run check-dist   # validate wheel/sdist metadata with twine
 ```
 
 CI pins every Action to an immutable commit and runs the unit, package metadata,

@@ -21,7 +21,7 @@ context: |
   - Tests live in tests/ and run under unittest discovery. Contract tests
     against a real hermes-agent checkout are gated on HERMES_AGENT_PATH.
   - tests/test_release_contract.py parses the GitHub workflows and asserts
-    their shape: SHA-pinned actions, just-only steps, no pull_request_target.
+    their shape: SHA-pinned actions, mise-task steps, no pull_request_target.
     Workflow changes belong there rather than in a parallel mechanism.
   - Keep skills/hermes-plugins/references/plugin-kit.md aligned with public
     API changes.

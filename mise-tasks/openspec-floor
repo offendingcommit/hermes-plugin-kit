@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+#MISE description="Refuse to run when the installed OpenSpec predates the archive-correctness fixes"
+#MISE hide=true
+set -euo pipefail
+min="$OPENSPEC_MIN"
+have="$("$OPENSPEC" --version 2>/dev/null | tr -d '[:space:]' || true)"
+if [[ -z "$have" ]]; then
+  echo "openspec not found on PATH; need >= $min" >&2
+  exit 1
+fi
+lowest="$(printf '%s\n%s\n' "$have" "$min" | sort -V | head -n1)"
+if [[ "$have" != "$min" && "$lowest" != "$min" ]]; then
+  echo "openspec $have is below the required $min" >&2
+  echo "Releases before $min could exit 0 from archive having applied" >&2
+  echo "less than the delta specified. Upgrade before validating or archiving." >&2
+  exit 1
+fi

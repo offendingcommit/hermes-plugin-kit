@@ -355,7 +355,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         `dist/` is absent and the test skipped, and failed locally against a
         stale artifact. Worse, mtime could not distinguish stale from wrong --
         the wheel that caught this was *newer* than the source and still built
-        from a mutated tree. End-to-end proof belongs in `just check-install`,
+        from a mutated tree. End-to-end proof belongs in `mise run check-install`,
         which builds, installs and imports; this is the fast, deterministic
         half.
         """

@@ -72,13 +72,23 @@ plugin.
   before submitting it or mutating another host registry. Keep engine schemas
   and recovery dispatch on `get_tool_schemas` / `handle_tool_call`; do not
   duplicate native engine tools through `@tool`.
+- Register gateway platforms with `@platform` on a `BasePlatformAdapter`
+  subclass through `register_plugin`. Check options against the host's own
+  `PlatformEntry`, never a kit-owned field list; read platform existence with
+  `core_ships_platform` and `snapshot_registration` under the plugin manager's
+  scope (the one Hermes writes to) plus the global scope, never
+  `PlatformRegistry.get`, which imports deferred SDKs. Access-policy options
+  are never optional. Replacing an existing
+  platform stays operator-gated through `plugins.<name>.replace_platforms`, and
+  a host refusal must dispose this call's earlier platform handles.
 - Redact secret-looking values in logs and avoid logging full untrusted payloads.
-- Get Python, `uv` and `just` from `mise.toml` and `mise.lock`
+- Get Python and `uv` from `mise.toml` and `mise.lock`
   (`mise trust && mise install --locked`), the same toolchain CI installs;
   after changing a tool pin, regenerate the lock with
   `mise lock --platform linux-x64,linux-arm64,macos-arm64`. Then use the
-  `justfile` for local development: `just install`, `just test`,
-  `just test-one tests.test_kit.SchemaConventionTests`, and `just build`.
+  mise tasks for local development (`mise tasks ls` lists them; one-line tasks
+  live in `mise.toml`, longer ones in `mise-tasks/`): `mise run install`, `mise run test`,
+  `mise run test-one tests.test_kit.SchemaConventionTests`, and `mise run build`.
 
 ## Release Notes
 

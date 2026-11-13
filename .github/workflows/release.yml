@@ -62,7 +62,7 @@ jobs:
       - name: Attach the exact trigger to local main
         env:
           EXPECTED_SHA: ${{ github.sha }}
-        run: just release-attach-trigger
+        run: mise run release-attach-trigger
       - name: Install the frozen release toolchain
         run: uv sync --frozen
       - name: Validate the tagged baseline and strict release intent
@@ -208,7 +208,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          just test
+          mise run test
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(git rev-parse HEAD^)" = "$TRIGGER_SHA"
           test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"
@@ -268,7 +268,7 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          just test-contract-pinned
+          mise run test-contract-pinned
           # Record the revision actually exercised, from the checkout the
           # pinned lane created -- not the constant, so the evidence reflects
           # what ran. Cross-check it against the constant so a renamed
@@ -351,8 +351,8 @@ jobs:
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test -z "$(git status --porcelain --untracked-files=no)"
-          just build
-          just check-dist
+          mise run build
+          mise run check-dist
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           test "$(git rev-parse HEAD^)" = "$TRIGGER_SHA"
           test "$(git rev-list -n 1 "$TAG")" = "$RELEASE_SHA"

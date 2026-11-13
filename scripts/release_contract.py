@@ -307,19 +307,19 @@ def create_release_manifest(
         "registry_repository": REGISTRY_REPOSITORY,
         "artifacts": _artifact_records(artifact_dir, version),
         "evidence": {
-            "unit": {**passed, "command": "just test"},
+            "unit": {**passed, "command": "mise run test"},
             "public_contract": {
                 **passed,
-                "command": "just test-release (included in just test)",
+                "command": "mise run test-release (included in mise run test)",
             },
             "hermes_contract": {
                 **passed,
-                "command": "just test-contract-pinned",
+                "command": "mise run test-contract-pinned",
                 "hermes_source_sha": hermes_source_sha,
             },
             "build_metadata": {
                 **passed,
-                "command": "just build && just check-dist",
+                "command": "mise run build && mise run check-dist",
             },
             "workflow": {
                 "name": workflow,
@@ -418,10 +418,10 @@ def validate_release_identity(receipt: dict[str, object], *, state: str) -> None
     }:
         raise ReleaseContractError("release receipt evidence is incomplete")
     commands = {
-        "unit": "just test",
-        "public_contract": "just test-release (included in just test)",
-        "hermes_contract": "just test-contract-pinned",
-        "build_metadata": "just build && just check-dist",
+        "unit": "mise run test",
+        "public_contract": "mise run test-release (included in mise run test)",
+        "hermes_contract": "mise run test-contract-pinned",
+        "build_metadata": "mise run build && mise run check-dist",
     }
     for gate, command in commands.items():
         item = evidence.get(gate)

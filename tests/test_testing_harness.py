@@ -164,6 +164,145 @@ class DriftReplayTests(unittest.TestCase):
         self.assertIn("plugin_name", str(caught.exception))
 
 
+class HostWithPlatforms(HostV1):
+    """The pinned register_platform shape: named fields plus **entry_kwargs."""
+
+    def register_platform(
+        self, name, label, adapter_factory, check_fn, validate_config=None,
+        required_env=None, install_hint="", **entry_kwargs,
+    ): ...
+
+
+# Every PlatformEntry field the recorded call below uses, as a host would list them.
+_ENTRY_FIELDS = frozenset({
+    "name", "label", "adapter_factory", "check_fn", "validate_config",
+    "required_env", "install_hint", "source", "plugin_name", "emoji", "display_tier",
+})
+
+
+def _register_a_platform(ctx) -> None:
+    ctx.register_platform(
+        name="web_chat", label="Web Chat", adapter_factory=object,
+        check_fn=lambda: True, validate_config=None, required_env=[],
+        install_hint="", emoji="*", display_tier="minimal",
+    )
+
+
+class PlatformOptionDriftTests(unittest.TestCase):
+    """Signature binding accepts any name inside **entry_kwargs, so options get
+    their own check against the host's PlatformEntry fields."""
+
+    def test_host_without_a_recorded_option_reports_drift_naming_it(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        _register_a_platform(ctx)
+
+        report = ctx.check_against_host(
+            HostWithPlatforms, platform_entry_fields=_ENTRY_FIELDS - {"display_tier"}
+        )
+
+        self.assertTrue(report.checked)
+        self.assertFalse(report.clean)
+        self.assertEqual(["register_platform"], [d.registrar for d in report.drifts])
+        self.assertIn("display_tier", report.drifts[0].detail)
+
+    def test_host_with_every_recorded_option_is_clean(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        _register_a_platform(ctx)
+
+        report = ctx.check_against_host(HostWithPlatforms, platform_entry_fields=_ENTRY_FIELDS)
+
+        self.assertTrue(report.clean, report)
+
+    def test_unknown_option_names_are_invisible_to_signature_binding_alone(self) -> None:
+        """Why the extra check exists: the signature replay alone calls this clean."""
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        _register_a_platform(ctx)
+
+        report = ctx.check_against_host(
+            HostWithPlatforms, platform_entry_fields=frozenset({"name"})
+        )
+
+        self.assertEqual(
+            {"label", "adapter_factory", "check_fn", "validate_config", "required_env",
+             "install_hint", "emoji", "display_tier"},
+            set(re.findall(r"\b[a-z_]+\b", report.drifts[0].detail.split(":", 1)[1])),
+        )
+
+    def test_platform_call_without_field_names_is_reported_unchecked(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        _register_a_tool(ctx)
+        _register_a_platform(ctx)
+
+        report = ctx.check_against_host(HostWithPlatforms)
+
+        self.assertFalse(report.checked)
+        self.assertFalse(report.clean)
+        self.assertIn("register_platform", report.detail)
+        self.assertIn("platform_entry_fields", report.detail)
+
+    def test_unchecked_options_still_report_signature_drift_found(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        _register_a_tool(ctx)
+        _register_a_platform(ctx)
+
+        report = ctx.check_against_host(HostAddedRequired)
+
+        self.assertFalse(report.checked)
+        self.assertIn("register_tool", [d.registrar for d in report.drifts])
+        self.assertIn("plugin_name", str(report))
+
+    def test_no_platform_calls_need_no_field_names(self) -> None:
+        ctx = hpk_testing.RecordingPluginContext(name="probe-plugin")
+        _register_a_tool(ctx)
+
+        self.assertTrue(ctx.check_against_host(HostV1).clean)
+
+
+class ResolvedHostPlatformFieldsTests(unittest.TestCase):
+    """ResolvedHost reads PlatformEntry's field names from the checkout itself."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _isolated_imports(self):
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.dict(sys.modules))
+        for name in [m for m in sys.modules if m == "gateway" or m.startswith("gateway.")]:
+            del sys.modules[name]
+        stack.enter_context(patch.object(sys, "path", list(sys.path)))
+        return stack
+
+    def test_reads_field_names_from_the_checkout(self) -> None:
+        gateway = self.root / "gateway"
+        gateway.mkdir()
+        (gateway / "__init__.py").write_text("")
+        (gateway / "platform_registry.py").write_text(
+            "from dataclasses import dataclass\n"
+            "@dataclass\n"
+            "class PlatformEntry:\n"
+            "    name: str\n"
+            "    label: str\n"
+            "    emoji: str = ''\n"
+        )
+        resolved = hpk_testing.ResolvedHost(self.root, "abc", "test")
+
+        with self._isolated_imports():
+            fields = resolved.platform_entry_fields()
+
+        self.assertEqual(frozenset({"name", "label", "emoji"}), fields)
+
+    def test_checkout_without_a_platform_registry_yields_none(self) -> None:
+        resolved = hpk_testing.ResolvedHost(self.root, "abc", "test")
+
+        with self._isolated_imports():
+            self.assertIsNone(resolved.platform_entry_fields())
+
+    def test_unavailable_host_yields_none(self) -> None:
+        self.assertIsNone(hpk_testing.ResolvedHost(None, None, "offline").platform_entry_fields())
+
+
 class AbsentHostTests(unittest.TestCase):
     """An unchecked run must not read as a checked one."""
 
@@ -448,6 +587,8 @@ class RegistrationCheckTests(unittest.TestCase):
 HOST_OWNED_NAMES = {
     # Hermes' own class; the kit takes an instance, it does not provide one.
     "ContextEngine",
+    # Hermes' adapter base; a @platform class subclasses it.
+    "BasePlatformAdapter",
 }
 
 

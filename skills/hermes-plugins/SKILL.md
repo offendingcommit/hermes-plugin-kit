@@ -71,7 +71,7 @@ For catalog or content plugins, keep public summaries from leaking raw prompts, 
 ## Validation
 
 Run the plugin repository's own install/test commands before committing —
-whatever its task runner is. (`just install` / `just test` / `just build` are
+whatever its task runner is. (`mise run install` / `mise run test` / `mise run build` are
 this kit's own recipes, not something a consumer repository has.)
 
 Also run focused registration, manifest-parity, hook or middleware, and local
@@ -98,7 +98,10 @@ ctx = RecordingPluginContext(name="your-plugin", config={})
 register(ctx)                     # your plugin's own registration entry point
 
 host = resolve_hermes_checkout()  # honors HERMES_AGENT_PATH; fetches at the pin otherwise
-report = ctx.check_against_host(host.plugin_context_class())
+report = ctx.check_against_host(
+    host.plugin_context_class(),
+    platform_entry_fields=host.platform_entry_fields(),  # needed if the plugin registers platforms
+)
 assert report.clean, report       # `checked` is False when no host was available
 ```
 

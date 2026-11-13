@@ -28,6 +28,7 @@ Nothing here imports hermes-agent or a test framework at module import time.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import os
 import subprocess
@@ -72,6 +73,8 @@ RECEIPT_FIELD_ORDER: tuple[str, ...] = (
     "capabilities",
     "context_engine",
     "context_engine_registration",
+    "platforms",
+    "replaced_platforms",
 )
 
 #: The hermes-agent revision this kit's contract lanes are pinned to.
@@ -107,7 +110,23 @@ _ALL_REGISTRARS = (
     "register_image_gen_provider",
     "register_video_gen_provider",
     "register_context_engine",
+    "register_platform",
 )
+
+
+class _RecordedRegistration:
+    """What the recording host's ``register_platform`` returns: a disposable handle,
+    shaped like the host's ``PluginRegistration`` (``active`` and ``dispose()``)."""
+
+    def __init__(self, release: Callable[[], None]) -> None:
+        self._release = release
+        self.active = True
+
+    def dispose(self) -> None:
+        if not self.active:
+            return
+        self.active = False
+        self._release()
 
 
 @dataclass(frozen=True)
@@ -142,11 +161,10 @@ class DriftReport:
         return self.clean
 
     def __str__(self) -> str:
+        found = "; ".join(str(d) for d in self.drifts)
         if not self.checked:
-            return f"unchecked: {self.detail}"
-        if not self.drifts:
-            return "clean"
-        return "; ".join(str(d) for d in self.drifts)
+            return f"unchecked: {self.detail}" + (f"; drift found: {found}" if found else "")
+        return found or "clean"
 
 
 def _positional_names(target: Callable[..., Any]) -> list[str] | None:
@@ -219,6 +237,9 @@ class RecordingPluginContext:
       prove the retry stays narrow and does not swallow an unrelated error.
     - ``missing_registrars`` -- omit a registrar entirely, which is how a host
       predating a surface behaves.
+    - ``refuse_platforms`` -- platform names ``register_platform`` refuses by
+      returning ``None``, the way the host reports a registration that did not
+      take. Accepted platforms return a handle whose ``dispose()`` removes them.
     """
 
     def __init__(
@@ -232,6 +253,7 @@ class RecordingPluginContext:
         missing_registrars: Iterable[str] = (),
         strict_against: type | None = None,
         context_engine_result: bool = True,
+        refuse_platforms: Iterable[str] = (),
     ) -> None:
         unknown = sorted(set(missing_registrars) - set(_ALL_REGISTRARS))
         if unknown:
@@ -253,8 +275,10 @@ class RecordingPluginContext:
         self.image_gen_providers: list[Any] = []
         self.video_gen_providers: list[Any] = []
         self.context_engines: list[Any] = []
+        self.platforms: list[dict[str, Any]] = []
 
         self.context_engine_result = context_engine_result
+        self.refuse_platforms = frozenset(refuse_platforms)
         self.subagent_lifecycle = SimpleNamespace(
             launch=lambda request: request,
             status=lambda handle: handle,
@@ -371,6 +395,29 @@ class RecordingPluginContext:
             self.context_engines.append(engine)
             return self.context_engine_result
 
+        def register_platform(
+            name, label, adapter_factory, check_fn, validate_config=None,
+            required_env=None, install_hint="", **entry_kwargs,
+        ):
+            kwargs = dict(
+                name=name, label=label, adapter_factory=adapter_factory,
+                check_fn=check_fn, validate_config=validate_config,
+                required_env=required_env, install_hint=install_hint, **entry_kwargs,
+            )
+            self._record("register_platform", (), kwargs)
+            if name in self.refuse_platforms:
+                return None
+            self.platforms.append(kwargs)
+
+            def release() -> None:
+                # By identity: two equal option dicts are still two registrations.
+                for i, registered in enumerate(self.platforms):
+                    if registered is kwargs:
+                        del self.platforms[i]
+                        return
+
+            return _RecordedRegistration(release)
+
         def _pick_skill_registrar() -> Callable[..., Any]:
             # Order matters: a raising host outranks the probe shapes, since a
             # test asking for an error wants it regardless of the keyword.
@@ -393,6 +440,7 @@ class RecordingPluginContext:
             "register_image_gen_provider": register_image_gen_provider,
             "register_video_gen_provider": register_video_gen_provider,
             "register_context_engine": register_context_engine,
+            "register_platform": register_platform,
         }
 
         for registrar, impl in implementations.items():
@@ -401,12 +449,22 @@ class RecordingPluginContext:
 
     # -- checking ------------------------------------------------------------
 
-    def check_against_host(self, host: type | None) -> DriftReport:
+    def check_against_host(
+        self,
+        host: type | None,
+        *,
+        platform_entry_fields: Iterable[str] | None = None,
+    ) -> DriftReport:
         """Replay every recorded call through ``host``'s signatures.
 
         Pass the real ``PluginContext`` class. ``None`` means no host was
         available, which produces an explicitly unchecked report rather than a
         clean one -- not having looked is not the same as having found nothing.
+
+        ``register_platform`` takes its options as ``**entry_kwargs``, so binding
+        accepts any option name. Pass the host's ``PlatformEntry`` field names
+        (:meth:`ResolvedHost.platform_entry_fields`) to check them too; a
+        recorded platform call without them leaves the report unchecked.
         """
         if host is None:
             return DriftReport(
@@ -429,7 +487,25 @@ class RecordingPluginContext:
             detail = _bind(target, args, kwargs, _POSITIONAL_PARAMS.get(registrar, ()))
             if detail is not None:
                 drifts.append(Drift(registrar, detail))
+            if registrar == "register_platform" and platform_entry_fields is not None:
+                gone = sorted(set(kwargs) - set(platform_entry_fields))
+                if gone:
+                    drifts.append(
+                        Drift(registrar, f"host PlatformEntry has no option: {', '.join(gone)}")
+                    )
 
+        if platform_entry_fields is None and any(
+            registrar == "register_platform" for registrar, _, _ in self.calls
+        ):
+            return DriftReport(
+                checked=False,
+                drifts=tuple(drifts),
+                detail=(
+                    "register_platform options were not checked: signature binding accepts "
+                    "any option name, so pass platform_entry_fields "
+                    "(ResolvedHost.platform_entry_fields()) to check them"
+                ),
+            )
         return DriftReport(checked=True, drifts=tuple(drifts))
 
 
@@ -584,6 +660,24 @@ class ResolvedHost:
         except Exception:  # pragma: no cover - depends on the checkout's shape
             return None
         return PluginContext
+
+    def platform_entry_fields(self) -> frozenset[str] | None:
+        """``PlatformEntry``'s field names from this checkout, or ``None``.
+
+        ``None`` (no checkout, or one without ``gateway/platform_registry.py``)
+        leaves a recorded ``register_platform`` call unchecked, never clean.
+        """
+        if self.path is None or not (self.path / "gateway" / "platform_registry.py").exists():
+            return None
+        root = str(self.path)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        try:
+            from gateway.platform_registry import PlatformEntry  # type: ignore
+
+            return frozenset(field.name for field in dataclasses.fields(PlatformEntry))
+        except Exception:  # pragma: no cover - depends on the checkout's shape
+            return None
 
 
 def _git(args: list[str], *, cwd: Path | None = None, timeout: int) -> str:

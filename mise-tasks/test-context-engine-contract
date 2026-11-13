@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+#MISE description="Run the context-engine contract. Requires an explicit checkout"
+set -euo pipefail
+: "${HERMES_AGENT_PATH:?set it to a hermes-agent checkout; this lane does not guess}"
+mise run provision-hermes-host "$HERMES_AGENT_PATH" "$HERMES_PINNED_VENV"
+HERMES_CONTRACT_REQUIRED=1 "$HERMES_PINNED_VENV/bin/python" -m unittest tests.test_context_engine_contract -v

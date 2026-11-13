@@ -62,7 +62,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, replace as _dataclass_replace
+from dataclasses import dataclass, fields as _dataclass_fields, replace as _dataclass_replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping, Protocol
@@ -81,6 +81,7 @@ __all__ = [
     "command",
     "middleware",
     "hook",
+    "platform",
     "plugin_skill",
     "get_subagent_lifecycle",
     "register_plugin",
@@ -136,6 +137,27 @@ _SPEC_ATTR = "_hpk_tool_spec"
 _COMMAND_SPEC_ATTR = "_hpk_command_spec"
 _MIDDLEWARE_SPEC_ATTR = "_hpk_middleware_spec"
 _HOOK_SPEC_ATTR = "_hpk_hook_spec"
+_PLATFORM_SPEC_ATTR = "_hpk_platform_spec"
+# PlatformEntry fields Hermes fills itself; a plugin passing them would forge
+# its own provenance.
+_HOST_OWNED_PLATFORM_OPTIONS = frozenset({"source", "plugin_name"})
+# register_platform parameters the annotation already names.
+# Host reads the replacement guard needs; checked together so a host missing
+# any of them names every gap at once.
+_PLATFORM_EXISTENCE_SYMBOLS = (
+    "core_ships_platform", "snapshot_registration", "current_scope_key",
+)
+# PlatformEntry fields that decide who can reach the agent. Dropping one on an
+# older host would silently change that, so none may be optional. Hermes tags
+# no field as policy, so the kit keeps this list.
+_ACCESS_POLICY_PLATFORM_OPTIONS = frozenset({
+    "trusted_inbound", "allowed_users_env", "allow_all_env", "allow_bots_env",
+    "own_policy_env", "group_allowed_chats_env", "allowlist_suppresses_pairing",
+})
+_NAMED_PLATFORM_OPTIONS = frozenset({
+    "name", "label", "adapter_factory", "check_fn",
+    "validate_config", "required_env", "install_hint",
+})
 _REDACT_HINTS = ("token", "secret", "password", "passwd", "api_key", "apikey", "auth")
 _MAX_LOG_CHARS = 200
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -494,6 +516,8 @@ class RegistrationSummary:
     capabilities: tuple[str, ...] = ()
     context_engine: str | None = None
     context_engine_registration: str | None = None
+    platforms: tuple[str, ...] = ()
+    replaced_platforms: tuple[str, ...] = ()
 
 
 class CommandType(str, Enum):
@@ -520,7 +544,7 @@ def log_registration_summary(
         "skills=%s; skipped_optional_skills=%s; memory_providers=%s; "
         "image_gen_providers=%s; "
         "video_gen_providers=%s; capabilities=%s; context_engine=%s; "
-        "context_engine_registration=%s",
+        "context_engine_registration=%s; platforms=%s; replaced_platforms=%s",
         clean_plugin_name,
         ",".join(summary.commands) or "<none>",
         ",".join(summary.cli_commands) or "<none>",
@@ -535,6 +559,8 @@ def log_registration_summary(
         ",".join(summary.capabilities) or "<none>",
         summary.context_engine or "<none>",
         summary.context_engine_registration or "<none>",
+        ",".join(summary.platforms) or "<none>",
+        ",".join(summary.replaced_platforms) or "<none>",
     )
 
 
@@ -1257,6 +1283,84 @@ def hook(name: str) -> Callable:
 
         setattr(wrapper, _HOOK_SPEC_ATTR, {"name": hook_name})
         return wrapper
+
+    return decorate
+
+
+def platform(
+    name: str,
+    *,
+    label: str,
+    check: Callable[[], bool],
+    validate: Callable[..., Any] | None = None,
+    required_env: Iterable[str] = (),
+    install_hint: str = "",
+    options: Mapping[str, Any] | None = None,
+    optional_options: Iterable[str] = (),
+) -> Callable[[type], type]:
+    """Mark a ``BasePlatformAdapter`` subclass as a Hermes gateway platform.
+
+    The class is returned unchanged and becomes the ``adapter_factory``;
+    :func:`register_plugin` validates it against the host and registers it.
+    ``options`` passes further ``PlatformEntry`` fields through unchanged.
+    An option named in ``optional_options`` is dropped, with a warning, on a
+    host whose ``PlatformEntry`` lacks it; any other unknown option fails
+    registration. Nothing here imports Hermes.
+    """
+    if not isinstance(name, str) or not name or name != name.strip().lower():
+        raise ValueError(
+            f"platform name must be non-empty, stripped and lowercase: {name!r}"
+        )
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("platform label must be a non-empty string")
+    if not callable(check):
+        raise TypeError("platform check must be callable")
+    if validate is not None and not callable(validate):
+        raise TypeError("platform validate must be callable")
+    if not isinstance(install_hint, str):
+        raise TypeError("platform install_hint must be a string")
+    env_names = list(required_env)
+    if not all(isinstance(env, str) and env.strip() for env in env_names):
+        raise ValueError("platform required_env must contain non-empty strings")
+    passed = dict(options or {})
+    for key in passed:
+        if not isinstance(key, str) or not key.isidentifier():
+            raise ValueError(f"platform option names must be identifiers: {key!r}")
+        if key in _HOST_OWNED_PLATFORM_OPTIONS:
+            raise ValueError(f"platform option {key!r}: the host owns this field")
+        if key in _NAMED_PLATFORM_OPTIONS:
+            raise ValueError(
+                f"platform option {key!r} duplicates a named argument of @platform"
+            )
+    optional = frozenset(optional_options)
+    not_passed = sorted(optional - passed.keys())
+    if not_passed:
+        raise ValueError(
+            "optional_options must name passed options; not passed: "
+            + ", ".join(not_passed)
+        )
+    policy = sorted(optional & _ACCESS_POLICY_PLATFORM_OPTIONS)
+    if policy:
+        raise ValueError(
+            "access-policy options cannot be optional; dropping one on an older "
+            "Hermes would change who can reach the agent: " + ", ".join(policy)
+        )
+    spec = {
+        "name": name,
+        "label": label.strip(),
+        "check_fn": check,
+        "validate_config": validate,
+        "required_env": tuple(env_names),
+        "install_hint": install_hint,
+        "options": passed,
+        "optional_options": optional,
+    }
+
+    def decorate(cls: type) -> type:
+        if not inspect.isclass(cls):
+            raise TypeError("@platform annotates an adapter class, not a function")
+        setattr(cls, _PLATFORM_SPEC_ATTR, spec)
+        return cls
 
     return decorate
 
@@ -2441,6 +2545,209 @@ def _validate_generation_providers(
     return registrar, tuple(validated)
 
 
+def _platform_spec(obj: Any) -> dict[str, Any] | None:
+    """The class's own @platform spec; an inherited one is not a declaration."""
+    if not inspect.isclass(obj):
+        return None
+    return vars(obj).get(_PLATFORM_SPEC_ATTR)
+
+
+def _platform_host() -> tuple[Any, frozenset[str], type]:
+    """Import the host's platform registry module, entry fields and base adapter.
+
+    Fails closed: a host without them cannot be checked, so nothing registers.
+    """
+    try:
+        registry_module = importlib.import_module("gateway.platform_registry")
+        base_module = importlib.import_module("gateway.platforms.base")
+    except ImportError as exc:
+        raise RuntimeError(
+            "hermes-agent platform registry is unavailable; platform registration refused"
+        ) from exc
+    try:
+        entry_fields = frozenset(
+            field.name for field in _dataclass_fields(registry_module.PlatformEntry)
+        )
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError(
+            "hermes-agent PlatformEntry is missing or not a dataclass; "
+            "platform registration refused"
+        ) from exc
+    base = getattr(base_module, "BasePlatformAdapter", None)
+    if not inspect.isclass(base):
+        raise RuntimeError(
+            "hermes-agent BasePlatformAdapter is unavailable; platform registration refused"
+        )
+    return registry_module, entry_fields, base
+
+
+def _platform_existence_reads(registry_module: Any) -> dict[str, Callable[..., Any]]:
+    """The host reads that tell whether a platform name already exists.
+
+    None of them resolves a deferred loader: ``PlatformRegistry.get`` would import
+    a bundled platform's SDK, so the guard never calls it. A host missing any of
+    them fails closed rather than skipping the guard.
+    """
+    registry = getattr(registry_module, "platform_registry", None)
+    reads = {
+        symbol: getattr(
+            registry_module if symbol == "core_ships_platform" else registry,
+            symbol,
+            None,
+        )
+        for symbol in _PLATFORM_EXISTENCE_SYMBOLS
+    }
+    missing = [symbol for symbol, read in reads.items() if not callable(read)]
+    if missing:
+        raise RuntimeError(
+            "hermes-agent platform registry lacks "
+            f"{', '.join(missing)}; cannot check for an existing platform, "
+            "so platform registration is refused"
+        )
+    return reads
+
+
+def _replace_platforms_setting(ctx: Any, plugin_name: str) -> frozenset[str]:
+    """The operator's ``plugins.<plugin>.replace_platforms`` list."""
+    key = f"plugins.{plugin_name}.replace_platforms"
+    value = load_plugin_config(ctx, plugin_name).get("replace_platforms", [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key} must be a list of platform names")
+    return frozenset(item.strip().lower() for item in value)
+
+
+def _describe_platform_owner(core: bool, entry: Any, loader: Any) -> str:
+    owners = []
+    if core:
+        owners.append("shipped by Hermes")
+    owner_plugin = getattr(entry, "plugin_name", None)
+    if owner_plugin:
+        owners.append(f"registered by plugin {owner_plugin!r}")
+    elif entry is not None:
+        owners.append(f"registered ({getattr(entry, 'source', 'unknown source')})")
+    if loader is not None:
+        owners.append("pending as a deferred platform")
+    return "; ".join(owners) or "already registered"
+
+
+def _preflight_platforms(
+    ctx: Any,
+    platforms: Mapping[str, type],
+    plugin_name: str,
+    log: logging.Logger,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Check every declared platform against the host.
+
+    Returns the ``register_platform`` keyword arguments and the names this
+    registration replaces. Pure: nothing here registers, so a failure leaves
+    the host untouched.
+    """
+    registry_module, entry_fields, base = _platform_host()
+    reads = _platform_existence_reads(registry_module)
+    allowed_replacements = _replace_platforms_setting(ctx, plugin_name)
+    manifest_name = getattr(getattr(ctx, "manifest", None), "name", None)
+    # Read the scope Hermes' register_platform writes to: its plugin manager's.
+    # In a multiplexer that can differ from HERMES_HOME's current_scope_key().
+    scope = getattr(getattr(ctx, "_manager", None), "scope_key", None)
+    if not isinstance(scope, str) or not scope:
+        scope = reads["current_scope_key"]()
+    prepared: list[dict[str, Any]] = []
+    replaced: list[str] = []
+    for name in sorted(platforms):
+        cls = platforms[name]
+        spec = vars(cls)[_PLATFORM_SPEC_ATTR]
+        if not issubclass(cls, base):
+            raise TypeError(
+                f"platform {name!r}: {cls.__qualname__} must subclass Hermes' "
+                "BasePlatformAdapter"
+            )
+        options = dict(spec["options"])
+        unknown = sorted(set(options) - entry_fields)
+        refused = [key for key in unknown if key not in spec["optional_options"]]
+        if refused:
+            raise ValueError(
+                f"platform {name!r}: this Hermes PlatformEntry has no option "
+                f"{', '.join(refused)}; upgrade Hermes or list it in optional_options"
+            )
+        for key in unknown:
+            del options[key]
+            log.warning(
+                "hermes_plugin_kit: platform option unsupported by this Hermes, dropped; "
+                "platform=%s; option=%s",
+                name,
+                key,
+            )
+        core = bool(reads["core_ships_platform"](name))
+        if options.get("trusted_inbound") and core:
+            raise ValueError(
+                f"platform {name!r}: trusted_inbound cannot be set on a platform "
+                "Hermes ships; it would waive allowlists and pairing"
+            )
+        scoped = reads["snapshot_registration"](name, scope=scope)
+        shared = reads["snapshot_registration"](name, scope=None)
+        entry = scoped[0] if scoped[0] is not None else shared[0]
+        loader = scoped[1] if scoped[1] is not None else shared[1]
+        if core or entry is not None or loader is not None:
+            own_reload = (
+                not core
+                and entry is not None
+                and manifest_name is not None
+                and getattr(entry, "plugin_name", None) == manifest_name
+            )
+            if not own_reload:
+                if name not in allowed_replacements:
+                    raise ValueError(
+                        f"platform {name!r} already exists "
+                        f"({_describe_platform_owner(core, entry, loader)}). "
+                        f"To replace it, the operator must list it in "
+                        f"plugins.{plugin_name}.replace_platforms"
+                    )
+                replaced.append(name)
+        prepared.append({
+            "name": name,
+            "label": spec["label"],
+            "adapter_factory": cls,
+            "check_fn": spec["check_fn"],
+            "validate_config": spec["validate_config"],
+            "required_env": list(spec["required_env"]),
+            "install_hint": spec["install_hint"],
+            **options,
+        })
+    return prepared, replaced
+
+
+def _register_platforms(
+    ctx: Any,
+    prepared: list[dict[str, Any]],
+    log: logging.Logger,
+) -> list[str]:
+    """Register prepared platforms; on a host refusal, undo this call's earlier ones."""
+    handles: list[tuple[str, Any]] = []
+    for kwargs in prepared:
+        name = kwargs["name"]
+        handle = ctx.register_platform(**kwargs)
+        if handle is None:
+            stranded: list[str] = []
+            for registered, earlier in reversed(handles):
+                try:
+                    earlier.dispose()
+                except Exception as exc:  # keep unwinding; the refusal is the error to raise
+                    stranded.append(registered)
+                    log.warning(
+                        "hermes_plugin_kit: platform rollback failed; platform=%s; error_type=%s",
+                        registered,
+                        type(exc).__name__,
+                    )
+            left = (
+                f"rollback failed for {', '.join(stranded)}"
+                if stranded
+                else "nothing from this plugin was left registered"
+            )
+            raise RuntimeError(f"Hermes refused platform {name!r}; {left}")
+        handles.append((name, handle))
+    return [name for name, _ in handles]
+
+
 def register_plugin(
     ctx: Any,
     module: Any | Iterable[Callable],
@@ -2478,6 +2785,8 @@ def register_plugin(
                 "module must be a module, module name, or iterable of decorated callables"
             ) from exc
         for declaration in declarations:
+            if _platform_spec(declaration):
+                continue
             if not callable(declaration) or not any(
                 getattr(declaration, attr, None)
                 for attr in (
@@ -2488,7 +2797,8 @@ def register_plugin(
                 )
             ):
                 raise TypeError(
-                    "declaration iterables must contain only decorated callables"
+                    "declaration iterables must contain only decorated callables "
+                    "or @platform classes"
                 )
         declaration_module_name = next(
             (
@@ -2524,7 +2834,16 @@ def register_plugin(
     tools: dict[str, Callable] = {}
     middlewares: dict[str, Callable] = {}
     hooks: dict[str, Callable] = {}
+    platforms: dict[str, type] = {}
     for obj in declarations:
+        platform_spec = _platform_spec(obj)
+        if platform_spec:
+            existing = platforms.get(platform_spec["name"])
+            if existing is not None and existing is not obj:
+                raise ValueError(f"duplicate platform name: {platform_spec['name']}")
+            platforms[platform_spec["name"]] = obj
+            continue
+
         command_spec = getattr(obj, _COMMAND_SPEC_ATTR, None)
         if command_spec:
             raw_command_type = command_spec.get("type", CommandType.SLASH.value)
@@ -2614,6 +2933,7 @@ def register_plugin(
         "register_middleware": middlewares,
         "register_hook": hooks,
         "register_skill": available_skills,
+        "register_platform": platforms,
     }
     for registrar_name, surfaces in required_registrars.items():
         if surfaces and not callable(getattr(ctx, registrar_name, None)):
@@ -2677,6 +2997,16 @@ def register_plugin(
             raise TypeError(
                 "context_engine must be an instance of agent.context_engine.ContextEngine"
             )
+
+    prepared_platforms, replaced_platforms = (
+        _preflight_platforms(ctx, platforms, resolved_plugin_name, log)
+        if platforms
+        else ([], [])
+    )
+
+    # Platforms go first: a host refusal surfaces only at registration, and the
+    # rollback can undo platforms but not the surfaces registered after them.
+    registered_platforms = _register_platforms(ctx, prepared_platforms, log)
 
     context_engine_registration = None
     if context_engine_registrar is not None:
@@ -2816,6 +3146,8 @@ def register_plugin(
         capabilities=resolved_capabilities,
         context_engine=context_engine_name,
         context_engine_registration=context_engine_registration,
+        platforms=tuple(registered_platforms),
+        replaced_platforms=tuple(replaced_platforms),
     )
     log_registration_summary(log, resolved_plugin_name, summary)
     return summary
