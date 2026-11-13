@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#MISE description="Run the full contract suite against the deployed pin"
+# HERMES_EXPECTED_REVISION makes the lane refuse a checkout at any other
+# revision, so a stale HERMES_AGENT_PATH cannot receipt the wrong host.
+set -euo pipefail
+pin="$("$UV" run python -c 'from hermes_plugin_kit.testing import DEPLOYED_HERMES_REVISION as r; print(r)')"
+dir="${HERMES_AGENT_PATH:-$HERMES_PINNED_DIR}"
+if [[ -z "${HERMES_AGENT_PATH:-}" ]]; then
+  mise run prepare-hermes-ref "$pin" "$HERMES_PINNED_DIR"
+fi
+mise run provision-hermes-host "$dir" "$HERMES_PINNED_VENV"
+HERMES_CONTRACT_REQUIRED=1 HERMES_EXPECTED_REVISION="$pin" \
+  HERMES_AGENT_PATH="$(cd "$dir" && pwd)" \
+  mise run run-contract-suite "pinned $pin" "$HERMES_PINNED_VENV"

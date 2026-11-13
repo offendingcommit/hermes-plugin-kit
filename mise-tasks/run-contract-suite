@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#MISE description="Run both contract modules and prove the run actually executed checks"
+#MISE hide=true
+#USAGE arg "<label>"
+#USAGE arg "<venv>"
+# The exit status alone cannot say whether anything ran: unittest exits 0 when
+# every test skips. So the executed count is the evidence.
+set -euo pipefail
+label="$usage_label"
+log="$(mktemp)"
+trap 'rm -f "$log"' EXIT
+set +e
+"$usage_venv/bin/python" -m unittest tests.test_hermes_contract tests.test_context_engine_contract -v \
+  > "$log" 2>&1
+echo "EXIT=$?" >> "$log"
+set -e
+cat "$log"
+grep -qE '^EXIT=0' "$log" || { echo "contract suite failed ($label)" >&2; exit 1; }
+ran="$(grep -oE '^Ran [0-9]+' "$log" | grep -oE '[0-9]+' | head -n1)"
+test -n "$ran" && [ "$ran" -gt 0 ] \
+  || { echo "no contract tests ran ($label); a lane that checked nothing is not a lane that passed" >&2; exit 1; }
+if grep -qE 'OK \(skipped=' "$log"; then
+  echo "contract suite skipped tests ($label); expected a host for every case" >&2
+  exit 1
+fi
+echo "contract receipt: $label; executed=$ran"

@@ -71,7 +71,7 @@ For catalog or content plugins, keep public summaries from leaking raw prompts, 
 ## Validation
 
 Run the plugin repository's own install/test commands before committing —
-whatever its task runner is. (`just install` / `just test` / `just build` are
+whatever its task runner is. (`mise run install` / `mise run test` / `mise run build` are
 this kit's own recipes, not something a consumer repository has.)
 
 Also run focused registration, manifest-parity, hook or middleware, and local

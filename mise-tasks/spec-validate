@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#MISE description="Validate every OpenSpec change, and confirm each authored one will archive"
+#MISE depends=["openspec-floor"]
+set -euo pipefail
+changes="$("$OPENSPEC" list --json | "$UV" run python -c 'import json,sys; print("\n".join(c["name"] for c in json.load(sys.stdin)["changes"]))')"
+test -n "$changes" || { echo "no OpenSpec changes found" >&2; exit 1; }
+for change in $changes; do
+  echo "== $change"
+  "$OPENSPEC" validate "$change" --strict
+  # `validate --strict` can pass while `archive` refuses — a MODIFIED header
+  # matching nothing in the main spec is INFO at validate and fatal at archive.
+  # Resolving the deltas catches that early, but only once a proposal exists.
+  if [[ -f "openspec/changes/$change/proposal.md" ]]; then
+    "$OPENSPEC" show "$change" --diff >/dev/null
+  else
+    echo "   (not yet authored — skipping delta resolution)"
+  fi
+done

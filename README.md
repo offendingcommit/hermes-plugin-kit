@@ -930,9 +930,9 @@ so the linked directory is self-contained.
 
 ## Development
 
-Uses [mise](https://mise.jdx.dev/) to install the pinned Python,
-[uv](https://docs.astral.sh/uv/) and [Just](https://github.com/casey/just)
-from `mise.toml` and `mise.lock`, the same toolchain CI installs. Once per
+Uses [mise](https://mise.jdx.dev/) to install the pinned Python and
+[uv](https://docs.astral.sh/uv/) from `mise.toml` and `mise.lock`, the same
+toolchain CI installs, and to run the project's tasks. Once per
 checkout:
 
 ```bash
@@ -942,13 +942,13 @@ mise trust && mise install --locked
 Then:
 
 ```bash
-just install      # uv sync — create/sync the dev environment
-just test         # uv run python -m unittest discover -s tests
-just test-one tests.test_kit.SchemaConventionTests
-just test-release # release intent, artifact identity, and workflow contracts
-just test-contract # real upstream Hermes contract
-just build        # uv build — wheel + sdist
-just check-dist   # validate wheel/sdist metadata with twine
+mise run install      # uv sync — create/sync the dev environment
+mise run test         # uv run python -m unittest discover -s tests
+mise run test-one tests.test_kit.SchemaConventionTests
+mise run test-release # release intent, artifact identity, and workflow contracts
+mise run test-contract # real upstream Hermes contract
+mise run build        # uv build — wheel + sdist
+mise run check-dist   # validate wheel/sdist metadata with twine
 ```
 
 CI pins every Action to an immutable commit and runs the unit, package metadata,

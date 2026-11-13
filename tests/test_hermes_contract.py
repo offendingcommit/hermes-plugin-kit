@@ -44,7 +44,7 @@ def _import_real_hermes():
 
     Discovery lives in `tests/_hermes_host.py` so both contract modules share
     one policy. Nothing is auto-discovered: a `~/hermes-agent` fallback is what
-    made a bare `just test` exercise whatever branch a developer had, while CI
+    made a bare `mise run test` exercise whatever branch a developer had, while CI
     skipped the module entirely.
     """
     root = _hermes_host.host_root()

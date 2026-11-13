@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#MISE description="Attach an immutable CI trigger to the branch semantic-release matches"
+#MISE hide=true
+set -euo pipefail
+test "$GITHUB_REF" = "refs/heads/main"
+test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+git switch --force-create main "$EXPECTED_SHA"
+test "$(git branch --show-current)" = "main"
+test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
