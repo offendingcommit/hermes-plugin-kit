@@ -67,6 +67,9 @@ plugin.
 - Keep stateful Hermes provider ABCs as provider instances: register memory,
   image-generation, and video-generation providers through their specialized
   contexts instead of decorating provider methods as general plugin surfaces.
+  Do not add a provider declaration decorator: the explicit
+  `memory_providers=` / `image_gen_providers=` / `video_gen_providers=` tuples
+  are the contract (decided on offendingcommit/hermes-plugin-kit#22).
 - Register at most one real Hermes `ContextEngine` through `register_plugin`.
   Finish every registrar, identity, type, declaration, and provider preflight
   before submitting it or mutating another host registry. Keep engine schemas

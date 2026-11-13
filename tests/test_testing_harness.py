@@ -587,6 +587,10 @@ class RegistrationCheckTests(unittest.TestCase):
 HOST_OWNED_NAMES = {
     # Hermes' own class; the kit takes an instance, it does not provide one.
     "ContextEngine",
+    # Hermes' provider ABCs; the kit forwards instances, it provides none.
+    "MemoryProvider",
+    "ImageGenProvider",
+    "VideoGenProvider",
     # Hermes' adapter base; a @platform class subclasses it.
     "BasePlatformAdapter",
 }
