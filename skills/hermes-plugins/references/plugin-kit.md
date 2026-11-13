@@ -39,6 +39,7 @@ guidance, not a second implementation specification.
 | Plugin-owned skill | `plugin_skill` | `register_plugin(..., skills=...)` | Hermes adds the plugin namespace; missing required skills fail, optional skills warn and skip. Optional `references_dir` (a companion reference-files directory) drives kit-side validation and `plugin_reference_tool`; the host serves companion files by convention instead, from `references`/`templates`/`assets`/`scripts` beside `SKILL.md`, so name the directory accordingly. See [`README.md`](../../../README.md#commands-middleware-hooks-and-plugin-skills). |
 | Agent-visible skill reference files (today) | `plugin_reference_tool` | `register_plugin` (its return value is an ordinary `@tool` function — add it to the plugin's declarations) | Sidesteps `register_skill` entirely by exposing `references_dir` as a normal tool call; accepts both paths listed by the tool and skill-relative `references/<path>` forms, while rejecting any path that resolves outside `references_dir` (symlink, absolute path, or `../`) and any non-string `file_path`. `references_dir` itself must be inside the skill's own directory — enforced by `plugin_skill` and re-checked here. |
 | Context engine | Hermes `ContextEngine` instance | `register_plugin(..., context_engine=...)` | Singular native engine registration; schemas and recovery dispatch stay in `get_tool_schemas()` / `handle_tool_call()`, never duplicated with `@tool`. |
+| Gateway platform | `@platform` on a `BasePlatformAdapter` subclass | `register_plugin` | The class is the adapter factory. Options are checked against the host's `PlatformEntry` before anything registers; `optional_options` may be dropped on an older host. Replacing a platform that exists fails unless the operator lists it in `plugins.<name>.replace_platforms`. A host refusal rolls back this call's platforms. |
 | Host-managed call | `invoke_host_tool` | None | Use for supported non-registry capabilities such as `send_message`; pre/post-tool hooks remain active. |
 | Local media delivery | `MediaPayload`, `MediaType`, `deliver_media` | Consumer registers suppression hooks | File must be absolute, present, and non-empty; `origin` resolves from task-local Hermes context. |
 | Checking a plugin against the real host | `RecordingPluginContext`, `resolve_hermes_checkout`, `check_registration`, `DEPLOYED_HERMES_REVISION` | None — test-time only | Records what the plugin registers, and its `check_against_host()` replays those calls against the real `PluginContext` signatures. Needs no host to record; reports `checked == False` rather than clean when it could not check. Requires kit 0.9.0 or newer. |
@@ -56,6 +57,8 @@ registration state.
 - Redacted lifecycle logging and registration inventories.
 - A versioned, correlated lifecycle-event shape with bounded local JSON logging.
 - Duplicate lifecycle declaration checks before registration.
+- Gateway platform registration: host option checks, the replacement guard
+  and its operator override, and rollback when Hermes refuses a platform.
 - Guarded host invocation for supported host-managed tools.
 - Typed Hermes media directives, origin resolution, privacy-safe results, and
   the narrow Telegram spoiler-photo extension.
@@ -66,7 +69,8 @@ Use the direct Hermes API or the specialized upstream plugin interface for:
 
 - `ctx.register_cli_command`, `ctx.dispatch_tool`, `ctx.inject_message`, or
   `ctx.llm.complete*`.
-- Gateway platform adapters.
+- Gateway platform adapter behavior (connect, send, media); the kit registers
+  adapters but `BasePlatformAdapter` and Hermes' helpers own what they do.
 - Memory, model, image, video, browser, web-search, secret source, desktop, or
   dashboard provider interfaces. The one supported context-engine seam is the
   singular typed `register_plugin` adapter; the kit does not abstract engine
@@ -105,6 +109,17 @@ the same operations with `@tool` shadows the active-context-aware dispatch.
 - Plain Hermes handlers return encoded strings. Kit-decorated handlers may return
   dictionaries because the wrapper encodes them. Do not double-encode by habit.
 - `send_message` is host-managed, not guaranteed to be registry-backed.
+- A platform name that Hermes ships or that is already registered is refused
+  unless the operator lists it in `plugins.<name>.replace_platforms`; setting it
+  from plugin code is not possible by design.
+- `optional_options` lets a platform register without an option on an older
+  host. Do not list an access-policy option (`allowed_users_env`,
+  `group_allowed_chats_env`) there unless losing it is acceptable.
+- Bundled platforms load as deferred loaders. The kit checks for them without
+  importing their SDKs; never call `PlatformRegistry.get` just to test a name.
+- Replaying a recorded `register_platform` call needs
+  `platform_entry_fields=host.platform_entry_fields()`, or the report is
+  unchecked: signature binding cannot see option names.
 - A successful `deliver_media` call needs
   `transform_media_delivery_output` registered as `transform_llm_output` and
   `clear_media_delivery_state` registered as `on_session_end`, or the gateway

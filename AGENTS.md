@@ -72,6 +72,13 @@ plugin.
   before submitting it or mutating another host registry. Keep engine schemas
   and recovery dispatch on `get_tool_schemas` / `handle_tool_call`; do not
   duplicate native engine tools through `@tool`.
+- Register gateway platforms with `@platform` on a `BasePlatformAdapter`
+  subclass through `register_plugin`. Check options against the host's own
+  `PlatformEntry`, never a kit-owned field list; read platform existence with
+  `core_ships_platform`, `is_registered` and `snapshot_registration`, never
+  `PlatformRegistry.get`, which imports deferred SDKs. Replacing an existing
+  platform stays operator-gated through `plugins.<name>.replace_platforms`, and
+  a host refusal must dispose this call's earlier platform handles.
 - Redact secret-looking values in logs and avoid logging full untrusted payloads.
 - Get Python, `uv` and `just` from `mise.toml` and `mise.lock`
   (`mise trust && mise install --locked`), the same toolchain CI installs;

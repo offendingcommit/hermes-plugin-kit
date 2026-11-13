@@ -450,6 +450,8 @@ visible in container logs without forcing verbose plugin logging everywhere.
 `log_registration_summary(logger, plugin_name, summary)` helper. The receipt
 uses the Hermes manifest name when available and lists the actual registered
 command, tool, middleware, hook, and skill names, plus skipped optional skills.
+Platform fields (`platforms`, `replaced_platforms`) come last, after every
+older field, so position-based parsers keep reading the fields they knew.
 Runtime-gated consumers should pass their active decorated declarations to
 `register_plugin`; a truly custom registration path can call the same helper
 with its own `RegistrationSummary` instead of inventing a second receipt
@@ -759,6 +761,64 @@ It mocks only the final Bot API client and asserts that Hermes calls `send_photo
 and `send_voice` with the expected files, without separate text messages. It
 also runs the kit-owned spoiler extension against Hermes' real config, session,
 async bridge, and Telegram library shapes while mocking only Bot network calls.
+
+## Gateway platforms
+
+A plugin that adds a messaging channel annotates its adapter class with
+`@platform` and passes it to `register_plugin` like any other declaration. The
+class must subclass Hermes' `BasePlatformAdapter`; it is registered as-is and
+becomes the `adapter_factory` Hermes calls with the platform config. Follow
+Hermes' own adapter guide (`website/docs/developer-guide/adding-platform-adapters.md`)
+for the adapter itself.
+
+```python
+from gateway.platforms.base import BasePlatformAdapter
+from hermes_plugin_kit import platform, register_plugin
+
+
+def web_chat_ready() -> bool:  # passive: report whether dependencies import
+    return True
+
+
+@platform(
+    "web_chat",
+    label="Web Chat",
+    check=web_chat_ready,
+    required_env=["WEB_CHAT_TOKEN"],
+    options={"emoji": "💬", "display_tier": "minimal"},
+    optional_options={"display_tier"},
+)
+class WebChatAdapter(BasePlatformAdapter):
+    ...
+
+
+def register(ctx):
+    return register_plugin(ctx, [WebChatAdapter])
+```
+
+`options` passes further `PlatformEntry` fields through unchanged, and
+`register_plugin` checks every name against the running host's own
+`PlatformEntry` before anything registers. An unknown option fails registration;
+one listed in `optional_options` is dropped on a host that lacks it and logged
+by name. `source` and `plugin_name` belong to the host and are refused.
+`trusted_inbound` is never set unless you pass it, and is refused on any
+platform Hermes ships.
+
+Replacing a platform that already exists, one Hermes ships or one already
+registered, fails loudly. Only the operator can allow it, by naming the
+platform in the plugin's config:
+
+```yaml
+plugins:
+  my-plugin:
+    replace_platforms: [telegram]
+```
+
+A reload of the plugin's own platform needs no entry, except for a platform
+Hermes ships. If Hermes refuses a registration (`register_platform` returns
+`None`), `register_plugin` disposes the platforms it already registered in that
+call and raises, so a refused plugin leaves no platform behind. The receipt
+names `platforms` and `replaced_platforms`.
 
 ## Agent skill
 
