@@ -28,6 +28,7 @@ Nothing here imports hermes-agent or a test framework at module import time.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import os
 import subprocess
@@ -160,11 +161,10 @@ class DriftReport:
         return self.clean
 
     def __str__(self) -> str:
+        found = "; ".join(str(d) for d in self.drifts)
         if not self.checked:
-            return f"unchecked: {self.detail}"
-        if not self.drifts:
-            return "clean"
-        return "; ".join(str(d) for d in self.drifts)
+            return f"unchecked: {self.detail}" + (f"; drift found: {found}" if found else "")
+        return found or "clean"
 
 
 def _positional_names(target: Callable[..., Any]) -> list[str] | None:
@@ -449,12 +449,22 @@ class RecordingPluginContext:
 
     # -- checking ------------------------------------------------------------
 
-    def check_against_host(self, host: type | None) -> DriftReport:
+    def check_against_host(
+        self,
+        host: type | None,
+        *,
+        platform_entry_fields: Iterable[str] | None = None,
+    ) -> DriftReport:
         """Replay every recorded call through ``host``'s signatures.
 
         Pass the real ``PluginContext`` class. ``None`` means no host was
         available, which produces an explicitly unchecked report rather than a
         clean one -- not having looked is not the same as having found nothing.
+
+        ``register_platform`` takes its options as ``**entry_kwargs``, so binding
+        accepts any option name. Pass the host's ``PlatformEntry`` field names
+        (:meth:`ResolvedHost.platform_entry_fields`) to check them too; a
+        recorded platform call without them leaves the report unchecked.
         """
         if host is None:
             return DriftReport(
@@ -477,7 +487,25 @@ class RecordingPluginContext:
             detail = _bind(target, args, kwargs, _POSITIONAL_PARAMS.get(registrar, ()))
             if detail is not None:
                 drifts.append(Drift(registrar, detail))
+            if registrar == "register_platform" and platform_entry_fields is not None:
+                gone = sorted(set(kwargs) - set(platform_entry_fields))
+                if gone:
+                    drifts.append(
+                        Drift(registrar, f"host PlatformEntry has no option: {', '.join(gone)}")
+                    )
 
+        if platform_entry_fields is None and any(
+            registrar == "register_platform" for registrar, _, _ in self.calls
+        ):
+            return DriftReport(
+                checked=False,
+                drifts=tuple(drifts),
+                detail=(
+                    "register_platform options were not checked: signature binding accepts "
+                    "any option name, so pass platform_entry_fields "
+                    "(ResolvedHost.platform_entry_fields()) to check them"
+                ),
+            )
         return DriftReport(checked=True, drifts=tuple(drifts))
 
 
@@ -632,6 +660,24 @@ class ResolvedHost:
         except Exception:  # pragma: no cover - depends on the checkout's shape
             return None
         return PluginContext
+
+    def platform_entry_fields(self) -> frozenset[str] | None:
+        """``PlatformEntry``'s field names from this checkout, or ``None``.
+
+        ``None`` (no checkout, or one without ``gateway/platform_registry.py``)
+        leaves a recorded ``register_platform`` call unchecked, never clean.
+        """
+        if self.path is None or not (self.path / "gateway" / "platform_registry.py").exists():
+            return None
+        root = str(self.path)
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        try:
+            from gateway.platform_registry import PlatformEntry  # type: ignore
+
+            return frozenset(field.name for field in dataclasses.fields(PlatformEntry))
+        except Exception:  # pragma: no cover - depends on the checkout's shape
+            return None
 
 
 def _git(args: list[str], *, cwd: Path | None = None, timeout: int) -> str:
