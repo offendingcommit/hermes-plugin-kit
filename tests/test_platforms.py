@@ -42,6 +42,22 @@ class _FakeRegistry:
     def snapshot_registration(self, name: str, *, scope=None):
         return self.entries.get(name), self.deferred.get(name)
 
+    def get(self, name: str):
+        # Like the host, resolving a deferred name runs its loader, which
+        # imports the platform's module. Preflight must never come here.
+        loader = self.deferred.pop(name, None)
+        if loader is not None:
+            self.entries[name] = loader()
+        return self.entries.get(name)
+
+
+_BUNDLED_MODULE = "gateway.platforms.fake_bundled"
+
+
+def _deferred_loader():
+    sys.modules[_BUNDLED_MODULE] = types.ModuleType(_BUNDLED_MODULE)
+    return types.SimpleNamespace(source="bundled", plugin_name="fake_bundled")
+
 
 @contextmanager
 def fake_platform_host(
@@ -429,6 +445,132 @@ class PlatformRegistrationTests(unittest.TestCase):
         self.assertTrue(
             receipt.endswith("platforms=<none>; replaced_platforms=<none>"), receipt
         )
+
+
+class PlatformReplacementGuardTests(unittest.TestCase):
+    """An existing platform is replaced only when the operator listed it."""
+
+    def _module_with(self, host, name):
+        @hpk.platform(name, label="Chat", check=_check)
+        class Adapter(host.BasePlatformAdapter):
+            pass
+
+        return _module(Adapter=Adapter, sample_read_thread=sample_read_thread)
+
+    def assertNothingRegistered(self, ctx) -> None:
+        self.assertEqual(ctx.calls, [])
+
+    def test_core_platform_without_override_fails_naming_the_key(self) -> None:
+        with fake_platform_host() as host:
+            ctx = RecordingPluginContext()
+            with self.assertRaises(ValueError) as caught:
+                _register(ctx, self._module_with(host, "telegram"))
+
+        message = str(caught.exception)
+        self.assertIn("telegram", message)
+        self.assertIn("plugins.test-plugin.replace_platforms", message)
+        self.assertNothingRegistered(ctx)
+
+    def test_core_platform_listed_in_override_is_replaced(self) -> None:
+        with fake_platform_host() as host:
+            ctx = RecordingPluginContext(config={"replace_platforms": ["telegram"]})
+            summary, receipt = _register(ctx, self._module_with(host, "telegram"))
+
+        self.assertEqual(summary.platforms, ("telegram",))
+        self.assertEqual(summary.replaced_platforms, ("telegram",))
+        self.assertEqual(receipt_fields(receipt)["replaced_platforms"], ("telegram",))
+
+    def test_platform_registered_by_another_plugin_names_the_owner(self) -> None:
+        with fake_platform_host() as host:
+            host.registry.entries["web_chat"] = types.SimpleNamespace(
+                source="plugin", plugin_name="other-plugin"
+            )
+            ctx = RecordingPluginContext()
+            with self.assertRaisesRegex(ValueError, "other-plugin"):
+                _register(ctx, self._module_with(host, "web_chat"))
+
+        self.assertNothingRegistered(ctx)
+
+    def test_deferred_platform_counts_as_existing_without_being_imported(self) -> None:
+        with fake_platform_host() as host:
+            host.registry.deferred["irc_like"] = _deferred_loader
+            ctx = RecordingPluginContext()
+            with self.assertRaisesRegex(ValueError, "irc_like"):
+                _register(ctx, self._module_with(host, "irc_like"))
+            imported = _BUNDLED_MODULE in sys.modules
+
+        self.assertFalse(imported)
+        self.assertNothingRegistered(ctx)
+
+    def test_deferred_platform_listed_in_override_is_replaced_without_import(self) -> None:
+        with fake_platform_host() as host:
+            host.registry.deferred["irc_like"] = _deferred_loader
+            ctx = RecordingPluginContext(config={"replace_platforms": ["irc_like"]})
+            summary, _ = _register(ctx, self._module_with(host, "irc_like"))
+            imported = _BUNDLED_MODULE in sys.modules
+
+        self.assertFalse(imported)
+        self.assertEqual(summary.replaced_platforms, ("irc_like",))
+
+    def test_reload_of_this_plugins_own_platform_needs_no_override(self) -> None:
+        with fake_platform_host() as host:
+            host.registry.entries["web_chat"] = types.SimpleNamespace(
+                source="plugin", plugin_name="test-plugin"
+            )
+            ctx = RecordingPluginContext()
+            summary, _ = _register(ctx, self._module_with(host, "web_chat"))
+
+        self.assertEqual(summary.platforms, ("web_chat",))
+        self.assertEqual(summary.replaced_platforms, ())
+
+    def test_reload_exemption_never_covers_a_core_platform(self) -> None:
+        with fake_platform_host() as host:
+            host.registry.entries["telegram"] = types.SimpleNamespace(
+                source="plugin", plugin_name="test-plugin"
+            )
+            ctx = RecordingPluginContext()
+            with self.assertRaisesRegex(ValueError, "replace_platforms"):
+                _register(ctx, self._module_with(host, "telegram"))
+
+        self.assertNothingRegistered(ctx)
+
+    def test_override_naming_another_platform_changes_nothing(self) -> None:
+        with fake_platform_host() as host:
+            ctx = RecordingPluginContext(config={"replace_platforms": ["telegram"]})
+            summary, receipt = _register(ctx, self._module_with(host, "web_chat"))
+
+        self.assertEqual(summary.platforms, ("web_chat",))
+        self.assertEqual(receipt_fields(receipt)["replaced_platforms"], ())
+
+    def test_override_that_is_not_a_list_fails_naming_the_key(self) -> None:
+        with fake_platform_host() as host:
+            ctx = RecordingPluginContext(config={"replace_platforms": "telegram"})
+            with self.assertRaisesRegex(ValueError, "plugins.test-plugin.replace_platforms"):
+                _register(ctx, self._module_with(host, "telegram"))
+
+        self.assertNothingRegistered(ctx)
+
+    def test_host_missing_existence_symbols_fails_closed(self) -> None:
+        symbols = hpk._PLATFORM_EXISTENCE_SYMBOLS
+        cases = [(symbol,) for symbol in symbols] + [tuple(symbols)]
+        for absent in cases:
+            with self.subTest(absent=absent):
+                with fake_platform_host() as host:
+                    for symbol in absent:
+                        if symbol == "core_ships_platform":
+                            host.module.core_ships_platform = None
+                        else:
+                            setattr(host.registry, symbol, None)
+                    ctx = RecordingPluginContext()
+                    with self.assertRaises(RuntimeError) as caught:
+                        _register(ctx, self._module_with(host, "web_chat"))
+
+                message = str(caught.exception)
+                for symbol in absent:
+                    self.assertIn(symbol, message)
+                for present in set(symbols) - set(absent):
+                    self.assertNotIn(present, message)
+                self.assertNothingRegistered(ctx)
 
 
 if __name__ == "__main__":

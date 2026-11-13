@@ -142,6 +142,11 @@ _PLATFORM_SPEC_ATTR = "_hpk_platform_spec"
 # its own provenance.
 _HOST_OWNED_PLATFORM_OPTIONS = frozenset({"source", "plugin_name"})
 # register_platform parameters the annotation already names.
+# Host reads the replacement guard needs; checked together so a host missing
+# any of them names every gap at once.
+_PLATFORM_EXISTENCE_SYMBOLS = (
+    "core_ships_platform", "is_registered", "snapshot_registration", "current_scope_key",
+)
 _NAMED_PLATFORM_OPTIONS = frozenset({
     "name", "label", "adapter_factory", "check_fn",
     "validate_config", "required_env", "install_hint",
@@ -2560,24 +2565,76 @@ def _platform_host() -> tuple[Any, frozenset[str], type]:
         raise RuntimeError(
             "hermes-agent BasePlatformAdapter is unavailable; platform registration refused"
         )
-    core_ships = getattr(registry_module, "core_ships_platform", None)
-    if not callable(core_ships):
-        raise RuntimeError(
-            "hermes-agent core_ships_platform is unavailable; platform registration refused"
-        )
     return registry_module, entry_fields, base
 
 
-def _preflight_platforms(
-    platforms: Mapping[str, type],
-    log: logging.Logger,
-) -> list[dict[str, Any]]:
-    """Check every declared platform against the host; return register_platform kwargs.
+def _platform_existence_reads(registry_module: Any) -> dict[str, Callable[..., Any]]:
+    """The host reads that tell whether a platform name already exists.
 
-    Pure: nothing here registers, so a failure leaves the host untouched.
+    None of them resolves a deferred loader: ``PlatformRegistry.get`` would import
+    a bundled platform's SDK, so the guard never calls it. A host missing any of
+    them fails closed rather than skipping the guard.
+    """
+    registry = getattr(registry_module, "platform_registry", None)
+    reads = {
+        symbol: getattr(
+            registry_module if symbol == "core_ships_platform" else registry,
+            symbol,
+            None,
+        )
+        for symbol in _PLATFORM_EXISTENCE_SYMBOLS
+    }
+    missing = [symbol for symbol, read in reads.items() if not callable(read)]
+    if missing:
+        raise RuntimeError(
+            "hermes-agent platform registry lacks "
+            f"{', '.join(missing)}; cannot check for an existing platform, "
+            "so platform registration is refused"
+        )
+    return reads
+
+
+def _replace_platforms_setting(ctx: Any, plugin_name: str) -> frozenset[str]:
+    """The operator's ``plugins.<plugin>.replace_platforms`` list."""
+    key = f"plugins.{plugin_name}.replace_platforms"
+    value = load_plugin_config(ctx, plugin_name).get("replace_platforms", [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key} must be a list of platform names")
+    return frozenset(item.strip().lower() for item in value)
+
+
+def _describe_platform_owner(core: bool, entry: Any, loader: Any) -> str:
+    owners = []
+    if core:
+        owners.append("shipped by Hermes")
+    owner_plugin = getattr(entry, "plugin_name", None)
+    if owner_plugin:
+        owners.append(f"registered by plugin {owner_plugin!r}")
+    elif entry is not None:
+        owners.append(f"registered ({getattr(entry, 'source', 'unknown source')})")
+    if loader is not None:
+        owners.append("pending as a deferred platform")
+    return "; ".join(owners) or "already registered"
+
+
+def _preflight_platforms(
+    ctx: Any,
+    platforms: Mapping[str, type],
+    plugin_name: str,
+    log: logging.Logger,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Check every declared platform against the host.
+
+    Returns the ``register_platform`` keyword arguments and the names this
+    registration replaces. Pure: nothing here registers, so a failure leaves
+    the host untouched.
     """
     registry_module, entry_fields, base = _platform_host()
+    reads = _platform_existence_reads(registry_module)
+    allowed_replacements = _replace_platforms_setting(ctx, plugin_name)
+    manifest_name = getattr(getattr(ctx, "manifest", None), "name", None)
     prepared: list[dict[str, Any]] = []
+    replaced: list[str] = []
     for name in sorted(platforms):
         cls = platforms[name]
         spec = vars(cls)[_PLATFORM_SPEC_ATTR]
@@ -2602,11 +2659,31 @@ def _preflight_platforms(
                 name,
                 key,
             )
-        if options.get("trusted_inbound") and registry_module.core_ships_platform(name):
+        core = bool(reads["core_ships_platform"](name))
+        if options.get("trusted_inbound") and core:
             raise ValueError(
                 f"platform {name!r}: trusted_inbound cannot be set on a platform "
                 "Hermes ships; it would waive allowlists and pairing"
             )
+        if core or reads["is_registered"](name):
+            entry, loader = reads["snapshot_registration"](
+                name, scope=reads["current_scope_key"]()
+            )
+            own_reload = (
+                not core
+                and entry is not None
+                and manifest_name is not None
+                and getattr(entry, "plugin_name", None) == manifest_name
+            )
+            if not own_reload:
+                if name not in allowed_replacements:
+                    raise ValueError(
+                        f"platform {name!r} already exists "
+                        f"({_describe_platform_owner(core, entry, loader)}). "
+                        f"To replace it, the operator must list it in "
+                        f"plugins.{plugin_name}.replace_platforms"
+                    )
+                replaced.append(name)
         prepared.append({
             "name": name,
             "label": spec["label"],
@@ -2617,7 +2694,7 @@ def _preflight_platforms(
             "install_hint": spec["install_hint"],
             **options,
         })
-    return prepared
+    return prepared, replaced
 
 
 def _register_platforms(
@@ -2902,7 +2979,11 @@ def register_plugin(
                 "context_engine must be an instance of agent.context_engine.ContextEngine"
             )
 
-    prepared_platforms = _preflight_platforms(platforms, log) if platforms else []
+    prepared_platforms, replaced_platforms = (
+        _preflight_platforms(ctx, platforms, resolved_plugin_name, log)
+        if platforms
+        else ([], [])
+    )
 
     # Platforms go first: a host refusal surfaces only at registration, and the
     # rollback can undo platforms but not the surfaces registered after them.
@@ -3047,6 +3128,7 @@ def register_plugin(
         context_engine=context_engine_name,
         context_engine_registration=context_engine_registration,
         platforms=tuple(registered_platforms),
+        replaced_platforms=tuple(replaced_platforms),
     )
     log_registration_summary(log, resolved_plugin_name, summary)
     return summary
