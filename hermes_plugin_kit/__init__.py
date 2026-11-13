@@ -81,6 +81,7 @@ __all__ = [
     "command",
     "middleware",
     "hook",
+    "platform",
     "plugin_skill",
     "get_subagent_lifecycle",
     "register_plugin",
@@ -136,6 +137,15 @@ _SPEC_ATTR = "_hpk_tool_spec"
 _COMMAND_SPEC_ATTR = "_hpk_command_spec"
 _MIDDLEWARE_SPEC_ATTR = "_hpk_middleware_spec"
 _HOOK_SPEC_ATTR = "_hpk_hook_spec"
+_PLATFORM_SPEC_ATTR = "_hpk_platform_spec"
+# PlatformEntry fields Hermes fills itself; a plugin passing them would forge
+# its own provenance.
+_HOST_OWNED_PLATFORM_OPTIONS = frozenset({"source", "plugin_name"})
+# register_platform parameters the annotation already names.
+_NAMED_PLATFORM_OPTIONS = frozenset({
+    "name", "label", "adapter_factory", "check_fn",
+    "validate_config", "required_env", "install_hint",
+})
 _REDACT_HINTS = ("token", "secret", "password", "passwd", "api_key", "apikey", "auth")
 _MAX_LOG_CHARS = 200
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -1257,6 +1267,78 @@ def hook(name: str) -> Callable:
 
         setattr(wrapper, _HOOK_SPEC_ATTR, {"name": hook_name})
         return wrapper
+
+    return decorate
+
+
+def platform(
+    name: str,
+    *,
+    label: str,
+    check: Callable[[], bool],
+    validate: Callable[..., Any] | None = None,
+    required_env: Iterable[str] = (),
+    install_hint: str = "",
+    options: Mapping[str, Any] | None = None,
+    optional_options: Iterable[str] = (),
+) -> Callable[[type], type]:
+    """Mark a ``BasePlatformAdapter`` subclass as a Hermes gateway platform.
+
+    The class is returned unchanged and becomes the ``adapter_factory``;
+    :func:`register_plugin` validates it against the host and registers it.
+    ``options`` passes further ``PlatformEntry`` fields through unchanged.
+    An option named in ``optional_options`` is dropped, with a warning, on a
+    host whose ``PlatformEntry`` lacks it; any other unknown option fails
+    registration. Nothing here imports Hermes.
+    """
+    if not isinstance(name, str) or not name or name != name.strip().lower():
+        raise ValueError(
+            f"platform name must be non-empty, stripped and lowercase: {name!r}"
+        )
+    if not isinstance(label, str) or not label.strip():
+        raise ValueError("platform label must be a non-empty string")
+    if not callable(check):
+        raise TypeError("platform check must be callable")
+    if validate is not None and not callable(validate):
+        raise TypeError("platform validate must be callable")
+    if not isinstance(install_hint, str):
+        raise TypeError("platform install_hint must be a string")
+    env_names = list(required_env)
+    if not all(isinstance(env, str) and env.strip() for env in env_names):
+        raise ValueError("platform required_env must contain non-empty strings")
+    passed = dict(options or {})
+    for key in passed:
+        if not isinstance(key, str) or not key.isidentifier():
+            raise ValueError(f"platform option names must be identifiers: {key!r}")
+        if key in _HOST_OWNED_PLATFORM_OPTIONS:
+            raise ValueError(f"platform option {key!r}: the host owns this field")
+        if key in _NAMED_PLATFORM_OPTIONS:
+            raise ValueError(
+                f"platform option {key!r} duplicates a named argument of @platform"
+            )
+    optional = frozenset(optional_options)
+    not_passed = sorted(optional - passed.keys())
+    if not_passed:
+        raise ValueError(
+            "optional_options must name passed options; not passed: "
+            + ", ".join(not_passed)
+        )
+    spec = {
+        "name": name,
+        "label": label.strip(),
+        "check_fn": check,
+        "validate_config": validate,
+        "required_env": tuple(env_names),
+        "install_hint": install_hint,
+        "options": passed,
+        "optional_options": optional,
+    }
+
+    def decorate(cls: type) -> type:
+        if not inspect.isclass(cls):
+            raise TypeError("@platform annotates an adapter class, not a function")
+        setattr(cls, _PLATFORM_SPEC_ATTR, spec)
+        return cls
 
     return decorate
 
