@@ -186,6 +186,9 @@ _HOOK_CONTEXT_KEYS = (
 _MEDIA_DELIVERY_STATE_TTL_SECONDS = 300.0
 _MEDIA_DELIVERY_STATE: dict[str, float] = {}
 _MEDIA_DELIVERY_STATE_LOCK = threading.Lock()
+# Media an ``as_reply`` delivery left for the turn's final reply, keyed by both
+# session_id and task_id (one shared entry, so consuming either key consumes it).
+_PENDING_REPLY_MEDIA: dict[str, "_PendingReplyMedia"] = {}
 _TELEGRAM_SPOILER_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 
 
@@ -724,6 +727,8 @@ class MediaDeliveryResult:
     path: Path
     host_result: dict[str, Any]
     spoiler: bool = False
+    # True when nothing was sent yet: the attachment rides this turn's final reply.
+    deferred: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -734,7 +739,17 @@ class MediaDeliveryResult:
             "path": str(self.path),
             "host_result": self.host_result,
             "spoiler": self.spoiler,
+            "deferred": self.deferred,
         }
+
+
+@dataclass
+class _PendingReplyMedia:
+    created_at: float
+    keys: tuple[str, ...]
+    host_target: str
+    context: dict[str, Any]
+    messages: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -1956,6 +1971,12 @@ def _prune_media_delivery_state(now: float) -> None:
     ]
     for key in expired:
         _MEDIA_DELIVERY_STATE.pop(key, None)
+    for key in [
+        key
+        for key, entry in _PENDING_REPLY_MEDIA.items()
+        if now - entry.created_at > _MEDIA_DELIVERY_STATE_TTL_SECONDS
+    ]:
+        _PENDING_REPLY_MEDIA.pop(key, None)
 
 
 def _mark_media_delivery_success(context: dict[str, Any]) -> None:
@@ -1981,6 +2002,60 @@ MEDIA_DELIVERED_REPLY = "✅"
 _MEDIA_MIRROR_LINE = re.compile(
     r"\[Sent (?:voice message|(?:image|video|audio|document) attachment|\d+ media attachments)\]"
 )
+
+
+def _defer_media_to_reply(
+    media: MediaPayload, resolved: ResolvedDeliveryTarget, context: dict[str, Any]
+) -> bool:
+    """Keep ``media`` for this turn's final reply; False when the turn has no identity."""
+    keys = _media_delivery_context_ids(context)
+    if not keys:
+        return False
+    now = time.monotonic()
+    with _MEDIA_DELIVERY_STATE_LOCK:
+        _prune_media_delivery_state(now)
+        entry = next((_PENDING_REPLY_MEDIA[k] for k in keys if k in _PENDING_REPLY_MEDIA), None)
+        if entry is None:
+            entry = _PendingReplyMedia(now, keys, resolved.host_target, dict(context), [])
+        entry.messages.append(media.to_message())
+        for key in (*entry.keys, *keys):
+            _PENDING_REPLY_MEDIA[key] = entry
+        entry.keys = tuple(dict.fromkeys((*entry.keys, *keys)))
+    return True
+
+
+def _pop_pending_reply_media(*context_ids: str) -> _PendingReplyMedia | None:
+    with _MEDIA_DELIVERY_STATE_LOCK:
+        _prune_media_delivery_state(time.monotonic())
+        entry = next(
+            (_PENDING_REPLY_MEDIA[k] for k in context_ids if k and k in _PENDING_REPLY_MEDIA),
+            None,
+        )
+        if entry is not None:
+            for key in entry.keys:
+                _PENDING_REPLY_MEDIA.pop(key, None)
+                _MEDIA_DELIVERY_STATE.pop(key, None)
+    return entry
+
+
+# shortcut: mirrors Hermes' gateway.response_filters.LIVE_GATEWAY_SILENT_MARKERS without
+# importing the gateway; the contract suite pins it to the host's own set.
+_SILENCE_MARKERS = frozenset({"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY", "[静默]", "静默", "[沉默]", "沉默"})
+_MEDIA_REPLY_LINE = re.compile(r"(?:MEDIA:\S+|\[\[(?:audio_as_voice|as_document)\]\])")
+
+
+def _reply_with_pending_media(response_text: str, entry: _PendingReplyMedia) -> str:
+    """The model's own words, minus silence markers, copied send notes and media
+    directives, followed by the deferred attachments."""
+    kept = [
+        line
+        for line in str(response_text or "").splitlines()
+        if line.strip() not in _SILENCE_MARKERS
+        and not _MEDIA_MIRROR_LINE.fullmatch(line.strip())
+        and not _MEDIA_REPLY_LINE.fullmatch(line.strip())
+    ]
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    return "\n".join(filter(None, (text, *entry.messages)))
 
 
 def strip_media_mirror_lines(response_text: str) -> str | None:
@@ -2014,6 +2089,15 @@ def transform_media_delivery_output(
     context_id = str(session_id or "").strip()
     if not context_id:
         return None
+    pending = _pop_pending_reply_media(context_id)
+    if pending is not None:
+        reply = _reply_with_pending_media(response_text, pending)
+        logging.getLogger("hermes_plugin_kit").info(
+            "event=media_reply_attached attachments=%d original_chars=%d",
+            len(pending.messages),
+            len(str(response_text or "")),
+        )
+        return reply
     now = time.monotonic()
     with _MEDIA_DELIVERY_STATE_LOCK:
         _prune_media_delivery_state(now)
@@ -2032,7 +2116,16 @@ def clear_media_delivery_state(
     task_id: str = "",
     **_: Any,
 ) -> None:
-    """Hermes ``on_session_end`` cleanup for an unconsumed suppression marker."""
+    """Hermes ``on_session_end`` (fired after every turn) cleanup.
+
+    Drops an unconsumed suppression marker. Media an ``as_reply`` delivery left
+    for a final reply that never carried it (a failed, interrupted or empty
+    turn, or another plugin's rewrite won) is sent directly instead, so a
+    deferred attachment is never lost.
+    """
+    pending = _pop_pending_reply_media(str(session_id or "").strip(), str(task_id or "").strip())
+    if pending is not None:
+        _send_pending_reply_media(pending)
     context_ids = tuple(
         dict.fromkeys(
             value
@@ -2189,13 +2282,42 @@ def _deliver_telegram_spoiler(
     return _run_async(send())
 
 
+def _send_pending_reply_media(entry: _PendingReplyMedia) -> None:
+    log = logging.getLogger("hermes_plugin_kit")
+    for message in entry.messages:
+        try:
+            raw = invoke_host_tool(
+                "send_message",
+                {"action": "send", "target": entry.host_target, "message": message},
+                **entry.context,
+            )
+            success = _host_result_fields(raw)[0] == "success"
+        except Exception as exc:  # the turn is over; log, never raise into the host
+            log.warning("event=media_reply_fallback_failed error=%s", type(exc).__name__)
+            continue
+        (log.info if success else log.warning)(
+            "event=media_reply_fallback_sent target=%s success=%s",
+            _display_delivery_target(entry.host_target),
+            success,
+        )
+
+
 def deliver_media(
     media: MediaPayload,
     *,
     target: str | ResolvedDeliveryTarget = "origin",
+    as_reply: bool = False,
     **context: Any,
 ) -> MediaDeliveryResult:
-    """Deliver typed local media through Hermes' guarded host messaging seam."""
+    """Deliver typed local media through Hermes' guarded host messaging seam.
+
+    ``as_reply=True`` with the ``origin`` target sends nothing now: the
+    attachment becomes this turn's final reply (``transform_media_delivery_output``
+    appends it), so the chat gets the media alone instead of the media plus a
+    separate confirmation. The result has ``deferred=True``. If the final reply
+    never carries it, ``clear_media_delivery_state`` sends it directly at turn
+    end. Spoiler media and explicit targets always send directly.
+    """
     if not isinstance(media, MediaPayload):
         raise TypeError("media must be a MediaPayload")
     if not media.path.is_file() or media.path.stat().st_size <= 0:
@@ -2206,6 +2328,27 @@ def deliver_media(
         else resolve_delivery_target(target)
     )
     log = logging.getLogger("hermes_plugin_kit")
+    if (
+        as_reply
+        and resolved.requested == "origin"
+        and not media.spoiler
+        and _defer_media_to_reply(media, resolved, context)
+    ):
+        log.info(
+            "event=media_delivery_deferred target=%s media_type=%s path=%s",
+            resolved.display,
+            media.media_type.value,
+            media.path,
+        )
+        return MediaDeliveryResult(
+            success=True,
+            requested_target=resolved.requested,
+            display_target=resolved.display,
+            media_type=media.media_type,
+            path=media.path,
+            host_result={"deferred": "final_reply"},
+            deferred=True,
+        )
     log.info(
         "event=media_delivery_started target=%s media_type=%s path=%s",
         resolved.display,

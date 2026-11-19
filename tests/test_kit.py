@@ -1352,6 +1352,145 @@ class MediaDeliveryContractTests(unittest.TestCase):
             )
         )
 
+    def _origin_modules(self) -> dict:
+        session_context = types.ModuleType("gateway.session_context")
+        values = {"HERMES_SESSION_PLATFORM": "telegram", "HERMES_SESSION_CHAT_ID": "8670382527"}
+        session_context.get_session_env = lambda name, default="": values.get(name, default)
+        gateway = types.ModuleType("gateway")
+        gateway.__path__ = []
+        gateway.session_context = session_context
+        return {"gateway": gateway, "gateway.session_context": session_context}
+
+    def test_as_reply_origin_media_becomes_the_final_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.dict(sys.modules, self._origin_modules()), patch.object(
+                hpk, "invoke_host_tool"
+            ) as invoke:
+                result = hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    as_reply=True,
+                    session_id="session-1",
+                    task_id="task-1",
+                )
+
+        invoke.assert_not_called()
+        self.assertTrue(result.success)
+        self.assertTrue(result.deferred)
+        self.assertEqual(result.display_target, "telegram:…2527")
+        self.assertEqual(result.host_result, {"deferred": "final_reply"})
+        self.assertEqual(
+            hpk.transform_media_delivery_output(response_text="NO_REPLY", session_id="session-1"),
+            f"[[audio_as_voice]]\nMEDIA:{path}",
+        )
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(response_text="next turn", session_id="session-1")
+        )
+
+    def test_as_reply_keeps_the_model_words_and_drops_copied_media_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.dict(sys.modules, self._origin_modules()):
+                hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    as_reply=True,
+                    session_id="session-1",
+                )
+
+        self.assertEqual(
+            hpk.transform_media_delivery_output(
+                response_text=f"Here you go.\n[Sent voice message]\n[[audio_as_voice]]\nMEDIA:{path}",
+                session_id="session-1",
+            ),
+            f"Here you go.\n[[audio_as_voice]]\nMEDIA:{path}",
+        )
+
+    def test_as_reply_carries_every_deferred_attachment_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memo = Path(tmp) / "memo.ogg"
+            memo.write_bytes(b"OggS" + b"\x00" * 16)
+            pic = Path(tmp) / "pic.png"
+            pic.write_bytes(b"\x89PNG" + b"\x00" * 16)
+            with patch.dict(sys.modules, self._origin_modules()):
+                hpk.deliver_media(
+                    hpk.MediaPayload(memo, hpk.MediaType.VOICE), as_reply=True, session_id="session-1"
+                )
+                hpk.deliver_media(hpk.MediaPayload(pic), as_reply=True, session_id="session-1")
+
+        self.assertEqual(
+            hpk.transform_media_delivery_output(response_text="NO_REPLY", session_id="session-1"),
+            f"[[audio_as_voice]]\nMEDIA:{memo}\nMEDIA:{pic}",
+        )
+
+    def test_turn_end_sends_deferred_media_the_reply_never_carried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.dict(sys.modules, self._origin_modules()):
+                hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    as_reply=True,
+                    session_id="session-1",
+                    task_id="task-1",
+                )
+            # A failed turn never runs the transform; compression may also rotate session_id.
+            with patch.object(
+                hpk, "invoke_host_tool", return_value=json.dumps({"success": True})
+            ) as invoke:
+                hpk.clear_media_delivery_state(session_id="session-rotated", task_id="task-1")
+                hpk.clear_media_delivery_state(session_id="session-1", task_id="task-1")
+
+        invoke.assert_called_once_with(
+            "send_message",
+            {
+                "action": "send",
+                "target": "telegram:8670382527",
+                "message": f"[[audio_as_voice]]\nMEDIA:{path}",
+            },
+            session_id="session-1",
+            task_id="task-1",
+        )
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(response_text="next turn", session_id="session-1")
+        )
+
+    def test_turn_end_sends_nothing_once_the_reply_carried_the_media(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.dict(sys.modules, self._origin_modules()):
+                hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE), as_reply=True, session_id="session-1"
+                )
+            hpk.transform_media_delivery_output(response_text="NO_REPLY", session_id="session-1")
+            with patch.object(hpk, "invoke_host_tool") as invoke:
+                hpk.clear_media_delivery_state(session_id="session-1")
+
+        invoke.assert_not_called()
+
+    def test_as_reply_to_an_explicit_target_still_sends_directly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(
+                hpk, "invoke_host_tool", return_value=json.dumps({"success": True})
+            ) as invoke:
+                result = hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram:8670382527",
+                    as_reply=True,
+                    session_id="session-1",
+                )
+
+        invoke.assert_called_once()
+        self.assertFalse(result.deferred)
+        self.assertEqual(
+            hpk.transform_media_delivery_output(response_text="NO_REPLY", session_id="session-1"),
+            "✅",
+        )
+
     def test_delivery_result_redacts_raw_route_from_host_errors(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "memo.ogg"

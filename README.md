@@ -765,6 +765,39 @@ a reply and sends the user a warning instead. Failed delivery does
 not arm suppression, and `on_session_end` clears any unconsumed marker. These are
 Hermes-agent lifecycle and response contracts; they are not OpenClaw shapes.
 
+### Media as the reply (`as_reply=True`)
+
+The ✅ is still a second message. When the attachment is the answer to the
+user's own message, pass `as_reply=True` with the `origin` target:
+
+```python
+result = deliver_media(
+    MediaPayload(path, MediaType.VOICE),
+    target="origin",
+    as_reply=True,
+    **runtime_context,
+)
+# result.deferred is True: nothing has been sent yet.
+```
+
+Nothing is sent at tool time. `transform_media_delivery_output` makes the
+attachment the turn's final reply instead: the model's own words, if any,
+followed by the `MEDIA:` directive. Silence markers (`NO_REPLY`), copied
+`[Sent voice message]` notes and repeated `MEDIA:` lines are dropped, so a
+model that answers `NO_REPLY` sends the attachment alone. Several `as_reply`
+calls in one turn all ride the same reply, in order.
+
+If the final reply never carries the attachment (the turn failed or was
+interrupted, the reply was empty, or another plugin's `transform_llm_output`
+won), `clear_media_delivery_state` sends it directly when the turn ends, which
+Hermes reports through `on_session_end` after every turn. A deferred attachment
+is therefore never lost; at worst it arrives the old way.
+
+Costs: the attachment arrives when the turn ends, not when the tool ran, and
+`success` means "accepted for the reply", so a caller that records a confirmed
+send (a durable receipt, for example) must not use `as_reply`. Explicit targets
+and `spoiler=True` media always send directly.
+
 For non-media host calls, `invoke_host_tool` remains the lower-level seam.
 `invoke_host_tool` resolves the supported direct host handler and wraps the nested
 operation with Hermes `pre_tool_call` and `post_tool_call` hooks. A blocking hook

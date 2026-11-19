@@ -55,6 +55,11 @@ plugin.
   `transform_llm_output` hook and `clear_media_delivery_state` as
   `on_session_end`; they must not recreate those contracts or substitute
   OpenClaw response shapes.
+- `deliver_media(..., as_reply=True)` to `origin` defers the attachment into
+  the turn's final reply instead of sending it plus a ✅. It must stay opt-in:
+  its `success` means "accepted", not "sent". `clear_media_delivery_state`
+  must keep sending any deferred attachment the reply did not carry, so a
+  failed or interrupted turn never loses it.
 - Use `tool_name(namespace, verb, noun)` for new tools and prefer explicit
   verbs such as `read`, `write`, and `patch`. Do not use Hermes agent-loop
   names (`memory`, `todo`, `session_search`, `delegate_task`) as plugin tools.
