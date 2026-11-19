@@ -696,6 +696,21 @@ class HermesContractTests(unittest.TestCase):
         self.assertTrue(is_intentional_silence_response("NO_REPLY"))
         self.assertFalse(is_intentional_silence_response(hpk.MEDIA_DELIVERED_REPLY))
 
+    def test_kit_silence_markers_match_the_host(self) -> None:
+        """A deferred-media reply drops the model's silence marker using the host's own set."""
+        from gateway.response_filters import LIVE_GATEWAY_SILENT_MARKERS  # type: ignore
+
+        self.assertEqual(hpk._SILENCE_MARKERS, frozenset(LIVE_GATEWAY_SILENT_MARKERS))
+
+    def test_deferred_media_reply_is_delivered_as_a_voice_note_alone(self) -> None:
+        """The final reply an as_reply delivery produces parses to one voice attachment, no text."""
+        from gateway.platforms.base import BasePlatformAdapter  # type: ignore
+
+        reply = hpk.MediaPayload("/m/memo.ogg", hpk.MediaType.VOICE).to_message()
+        media, text = BasePlatformAdapter.extract_media(reply)
+        self.assertEqual(media, [("/m/memo.ogg", True)])
+        self.assertEqual(text.strip(), "")
+
     def test_strip_media_mirror_lines_matches_every_hermes_mirror_shape(self) -> None:
         """Each note Hermes' send_message writes into history must be strippable."""
         from tools.send_message_tool import _describe_media_for_mirror  # type: ignore
