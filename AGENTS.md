@@ -55,6 +55,10 @@ plugin.
   `transform_llm_output` hook and `clear_media_delivery_state` as
   `on_session_end`; they must not recreate those contracts or substitute
   OpenClaw response shapes.
+- A host answer of `skipped: true` is never a delivery and must never arm the
+  ✅ suppression. The cron duplicate-target skip (`CRON_DUPLICATE_SKIP_REASON`,
+  pinned to the host by the contract suite) defers the attachment into the
+  cron job's final reply; every other skip returns `success=False`.
 - `deliver_media(..., as_reply=True)` to `origin` defers the attachment into
   the turn's final reply instead of sending it plus a ✅. It must stay opt-in:
   its `success` means "accepted", not "sent". `clear_media_delivery_state`

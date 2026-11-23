@@ -97,6 +97,7 @@ __all__ = [
     "deliver_media",
     "resolve_delivery_target",
     "MEDIA_DELIVERED_REPLY",
+    "CRON_DUPLICATE_SKIP_REASON",
     "strip_media_mirror_lines",
     "transform_media_delivery_output",
     "clear_media_delivery_state",
@@ -1995,6 +1996,10 @@ def _mark_media_delivery_success(context: dict[str, Any]) -> None:
 
 # The turn's visible reply after the attachment itself was already sent.
 MEDIA_DELIVERED_REPLY = "✅"
+# shortcut: Hermes' send_message skip reason for a cron send to the job's own
+# auto-delivery target (tools/send_message_tool.py _maybe_skip_cron_duplicate_send);
+# the contract suite pins it to the host.
+CRON_DUPLICATE_SKIP_REASON = "cron_auto_delivery_duplicate_target"
 
 # Hermes' send_message records each media send as an assistant line so the model
 # remembers it (tools/send_message_tool.py _describe_media_for_mirror). Models copy
@@ -2373,7 +2378,36 @@ def deliver_media(
         host_payload = json.loads(raw)
     except (TypeError, json.JSONDecodeError):
         host_payload = {"error": "send_message returned invalid JSON"}
-    success = _host_result_fields(raw)[0] == "success"
+    # A skipped send reports success but delivered nothing, so it must not arm the
+    # final-response suppression. Inside a cron run Hermes skips a send to the chat
+    # the job already replies to; the attachment then rides that reply instead.
+    skipped = isinstance(host_payload, dict) and host_payload.get("skipped") is True
+    if (
+        skipped
+        and host_payload.get("reason") == CRON_DUPLICATE_SKIP_REASON
+        and _defer_media_to_reply(media, resolved, context)
+    ):
+        log.info(
+            "event=media_delivery_deferred target=%s media_type=%s path=%s reason=%s",
+            resolved.display,
+            media.media_type.value,
+            media.path,
+            CRON_DUPLICATE_SKIP_REASON,
+        )
+        return MediaDeliveryResult(
+            success=True,
+            requested_target=(
+                resolved.requested
+                if resolved.requested == "origin"
+                else _display_delivery_target(resolved.requested)
+            ),
+            display_target=resolved.display,
+            media_type=media.media_type,
+            path=media.path,
+            host_result={"deferred": "final_reply"},
+            deferred=True,
+        )
+    success = _host_result_fields(raw)[0] == "success" and not skipped
     safe_result = _safe_media_host_result(host_payload, resolved)
     log_method = log.info if success else log.warning
     log_method(

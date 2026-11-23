@@ -129,6 +129,10 @@ the same operations with `@tool` shadows the active-context-aware dispatch.
   `transform_media_delivery_output` registered as `transform_llm_output` and
   `clear_media_delivery_state` registered as `on_session_end`, or the gateway
   can emit duplicate final output.
+- In a cron run, a send to the job's own auto-delivery chat comes back from
+  Hermes as `skipped`. `deliver_media` then returns `deferred=True` and the
+  attachment rides the job's final reply; do not retry the send or tell the
+  model to drop the `MEDIA:` line from its reply.
 - The kit follows the real Hermes contract tests. A fake context alone can hide
   signature drift.
 - Public source does not imply public package access. Wheels, sdists, and

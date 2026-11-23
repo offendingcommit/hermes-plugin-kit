@@ -1305,6 +1305,81 @@ class MediaDeliveryContractTests(unittest.TestCase):
             )
         )
 
+    def _cron_duplicate_skip(self) -> str:
+        """The answer Hermes' send_message gives a cron send to the job's own chat."""
+        return json.dumps(
+            {
+                "success": True,
+                "skipped": True,
+                "reason": hpk.CRON_DUPLICATE_SKIP_REASON,
+                "target": "telegram:8670382527",
+                "note": "Skipped send_message to telegram:8670382527.",
+            }
+        )
+
+    def test_cron_skipped_send_rides_the_final_reply_instead_of_a_checkmark(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(hpk, "invoke_host_tool", return_value=self._cron_duplicate_skip()):
+                result = hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram",
+                    session_id="session-1",
+                    task_id="cron:job-1:run-1",
+                )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.deferred)
+        self.assertEqual(result.host_result, {"deferred": "final_reply"})
+        self.assertEqual(
+            hpk.transform_media_delivery_output(response_text="NO_REPLY", session_id="session-1"),
+            f"[[audio_as_voice]]\nMEDIA:{path}",
+        )
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(response_text="next turn", session_id="session-1")
+        )
+
+    def test_cron_skipped_send_keeps_the_model_words_beside_the_memo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(hpk, "invoke_host_tool", return_value=self._cron_duplicate_skip()):
+                hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram",
+                    session_id="session-1",
+                )
+
+        self.assertEqual(
+            hpk.transform_media_delivery_output(
+                response_text=f"Ask me for the rest.\n[[audio_as_voice]]\nMEDIA:{path}",
+                session_id="session-1",
+            ),
+            f"Ask me for the rest.\n[[audio_as_voice]]\nMEDIA:{path}",
+        )
+
+    def test_other_skipped_send_is_not_a_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "memo.ogg"
+            path.write_bytes(b"OggS" + b"\x00" * 16)
+            with patch.object(
+                hpk,
+                "invoke_host_tool",
+                return_value=json.dumps({"success": True, "skipped": True, "reason": "muted"}),
+            ):
+                result = hpk.deliver_media(
+                    hpk.MediaPayload(path, hpk.MediaType.VOICE),
+                    target="telegram:8670382527",
+                    session_id="session-1",
+                )
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.deferred)
+        self.assertIsNone(
+            hpk.transform_media_delivery_output(response_text="keep this", session_id="session-1")
+        )
+
     def test_failed_delivery_does_not_suppress_final_response(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "memo.ogg"

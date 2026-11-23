@@ -798,6 +798,13 @@ Costs: the attachment arrives when the turn ends, not when the tool ran, and
 send (a durable receipt, for example) must not use `as_reply`. Explicit targets
 and `spoiler=True` media always send directly.
 
+Cron runs take the same path without `as_reply`. Hermes skips a cron job's
+`send_message` to the chat the job already auto-delivers to, answering
+`skipped: true` with reason `CRON_DUPLICATE_SKIP_REASON`. `deliver_media` then
+defers the attachment into the job's final reply and returns `deferred=True`,
+so the memo arrives with that reply instead of being replaced by a ✅. Any other
+skipped send returns `success=False`: nothing was delivered.
+
 For non-media host calls, `invoke_host_tool` remains the lower-level seam.
 `invoke_host_tool` resolves the supported direct host handler and wraps the nested
 operation with Hermes `pre_tool_call` and `post_tool_call` hooks. A blocking hook
