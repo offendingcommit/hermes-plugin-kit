@@ -696,6 +696,26 @@ class HermesContractTests(unittest.TestCase):
         self.assertTrue(is_intentional_silence_response("NO_REPLY"))
         self.assertFalse(is_intentional_silence_response(hpk.MEDIA_DELIVERED_REPLY))
 
+    def test_cron_duplicate_skip_reason_matches_the_host(self) -> None:
+        """deliver_media defers a cron send Hermes skips; the reason it matches must be the host's."""
+        from gateway import session_context  # type: ignore
+        from tools import send_message_tool  # type: ignore
+
+        values = {
+            "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
+            "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "8670382527",
+        }
+        with patch.object(
+            session_context,
+            "get_session_env",
+            lambda name, default="": values.get(name, default),
+        ):
+            skip = send_message_tool._maybe_skip_cron_duplicate_send("telegram", "8670382527", None)
+
+        self.assertTrue(skip["success"])
+        self.assertTrue(skip["skipped"])
+        self.assertEqual(skip["reason"], hpk.CRON_DUPLICATE_SKIP_REASON)
+
     def test_kit_silence_markers_match_the_host(self) -> None:
         """A deferred-media reply drops the model's silence marker using the host's own set."""
         from gateway.response_filters import LIVE_GATEWAY_SILENT_MARKERS  # type: ignore
